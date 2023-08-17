@@ -64,7 +64,7 @@ pub fn add_todo(todo: &Todo) -> SqlResult<()> {
     Ok(())
 }
 
-pub fn toggle_todo_completion(todo_id: i32, completed: bool) -> SqlResult<()> {
+pub fn toggle_todo_completion(todo_id: usize, completed: bool) -> SqlResult<()> {
     let conn = open_db()?;
     let completed_date = if completed {
         Some(Local::now().naive_local().to_string())
@@ -83,13 +83,13 @@ pub fn toggle_todo_completion(todo_id: i32, completed: bool) -> SqlResult<()> {
     Ok(())
 }
 
-pub fn delete_todo(todo_id: i32) -> SqlResult<()> {
+pub fn delete_todo(todo_id: usize) -> SqlResult<()> {
     let conn = open_db()?;
     conn.execute("DELETE FROM todos WHERE id = ?", params![todo_id])?;
     Ok(())
 }
 
-pub fn fetch_todos(list_id: i32) -> SqlResult<Vec<Todo>> {
+pub fn fetch_todos(list_id: usize) -> SqlResult<Vec<Todo>> {
     let conn = open_db()?;
 
     // Replace "WHERE 1" with your desired filter condition.
@@ -123,9 +123,10 @@ pub fn add_list(list: &TodoList) -> SqlResult<()> {
     Ok(())
 }
 
-pub fn delete_list(list_id: i32) -> SqlResult<()> {
+pub fn delete_list(list_id: usize) -> SqlResult<()> {
     let conn = open_db()?;
     conn.execute("DELETE FROM lists WHERE id = ?", params![list_id])?;
+    conn.execute("DELETE FROM todos WHERE list_id = ?", params![list_id])?;
     Ok(())
 }
 
