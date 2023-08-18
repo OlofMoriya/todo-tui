@@ -1,6 +1,8 @@
-use chrono::{Local, NaiveDate};
-use rusqlite::{Connection, Result, params};
+use std::{env, path::PathBuf, fs};
+
 use crate::model::{Todo, TodoList};
+use chrono::{Local, NaiveDate};
+use rusqlite::{params, Connection, Result};
 
 #[derive(Debug)]
 pub enum DatabaseError {
@@ -15,8 +17,23 @@ impl From<rusqlite::Error> for DatabaseError {
 
 pub type SqlResult<T> = std::result::Result<T, DatabaseError>;
 
+fn get_path() -> PathBuf {
+    let home_dir: PathBuf = match env::var_os("HOME") {
+        Some(home) => home.into(),
+        None => {
+            println!("Error: could not determine home directory.");
+            std::process::exit(2);
+        }
+    };
+    let dir = home_dir.join(".todo/");
+    if !dir.is_dir() {
+        fs::create_dir_all(dir).ok();
+    }
+    return home_dir.join(".todo/todos.sqlite");
+}
+
 pub fn open_db() -> SqlResult<Connection> {
-    let conn = Connection::open("todos.sqlite")?;
+    let conn = Connection::open(get_path())?;
     init_db(&conn)?;
     Ok(conn)
 }
@@ -100,26 +117,25 @@ pub fn fetch_todos(list_id: usize) -> SqlResult<Vec<Todo>> {
             list_id: row.get(1)?,
             title: row.get(2)?,
             description: row.get(3)?,
-            due_date: row.get::<_, Option<String>>(4)?.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
+            due_date: row
+                .get::<_, Option<String>>(4)?
+                .and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
             completed: row.get(5)?,
-            completed_date: row.get::<_, Option<String>>(6)?.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
+            completed_date: row
+                .get::<_, Option<String>>(6)?
+                .and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
             dependencies: vec![], // Fetch dependencies if needed.
         })
     })?;
 
-    let todos: Vec<Todo> = rows
-        .filter_map(Result::ok)
-        .collect();
+    let todos: Vec<Todo> = rows.filter_map(Result::ok).collect();
 
     Ok(todos)
 }
 
 pub fn add_list(list: &TodoList) -> SqlResult<()> {
     let conn = open_db()?;
-    conn.execute(
-        "INSERT INTO lists (title) VALUES (?)",
-        params![list.title],
-    )?;
+    conn.execute("INSERT INTO lists (title) VALUES (?)", params![list.title])?;
     Ok(())
 }
 
@@ -140,8 +156,6 @@ pub fn fetch_lists() -> SqlResult<Vec<TodoList>> {
         })
     })?;
 
-    let lists: Vec<TodoList> = rows
-        .filter_map(Result::ok)
-        .collect();
+    let lists: Vec<TodoList> = rows.filter_map(Result::ok).collect();
     Ok(lists)
 }
