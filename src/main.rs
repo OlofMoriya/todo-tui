@@ -116,7 +116,7 @@ fn run(
             }
             AppState::Create => draw_create_todo(terminal, &state),
 
-            AppState::CreateList => draw_create_list(terminal),
+            AppState::CreateList => draw_create_list(terminal, &state),
 
             AppState::Input(field) => draw_input(terminal, &mut state, field),
         };
@@ -141,8 +141,10 @@ fn run(
                                         Some(list_index) => {
                                             delete_list(lists[list_index].id.expect(
                                                 "Should get an id from the database create",
-                                            ))
+                                            ).clone())
                                             .ok();
+                                            state.lists_list_state.select(None);
+                                            state.todo_list_state.select(None);
                                         }
                                         None => {}
                                     },
@@ -239,7 +241,7 @@ fn run(
                             state.state = AppState::Input(InputField::ListTitle);
                         }
                         KeyCode::Char('s') => {
-                            save_todo_list(state.todo_title.clone());
+                            save_todo_list(state.list_title.clone());
                             state.input = "".to_string();
                             state.state = AppState::List;
                         }
@@ -349,7 +351,7 @@ fn lists_move_up(state: &mut State) {
 fn todos_move_down(state: &mut State, todos: &[Todo]) {
     match state.todo_list_state.selected() {
         Some(v) => {
-            state.todo_list_state.select(Some(min(v + 1, todos.len())));
+            state.todo_list_state.select(Some(min(v + 1, todos.len()-1)));
         }
         None => {
             state.todo_list_state.select(Some(0));
@@ -360,7 +362,7 @@ fn todos_move_down(state: &mut State, todos: &[Todo]) {
 fn lists_move_down(state: &mut State, lists: &Vec<TodoList>) {
     match state.lists_list_state.selected() {
         Some(v) => {
-            state.lists_list_state.select(Some(min(v + 1, lists.len())));
+            state.lists_list_state.select(Some(min(v + 1, lists.len()-1)));
         }
         None => {
             state.lists_list_state.select(Some(0));
@@ -419,20 +421,54 @@ fn draw_input(
         .ok();
 }
 
-fn draw_create_list(terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
+fn draw_create_list(terminal: &mut Terminal<CrosstermBackend<Stdout>>, state: &State) {
     terminal
         .draw(|frame| {
+            let size = frame.size();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(2)
+                .constraints(
+                    [
+                        Constraint::Length(2),
+                        Constraint::Min(5),
+                        Constraint::Length(4),
+                    ]
+                    .as_ref(),
+                )
+                .split(size);
+
             let text = vec![
-                Line::from("Create a list"),
                 Line::from("(t) Input title"),
                 Line::from("(s) Save list".green().italic()),
+                Line::from("(q) Cancel".red()),
             ];
+
             frame.render_widget(
-                Paragraph::new(text)
+                Paragraph::new("New list")
                     .style(Style::default())
                     .alignment(Alignment::Center),
-                frame.size(),
-            )
+                chunks[0],
+            );
+            frame.render_widget(
+                Paragraph::new(text.clone())
+                    .style(Style::default())
+                    .alignment(Alignment::Center),
+                chunks[1],
+            );
+
+            frame.render_widget(
+                Paragraph::new(state.list_title.clone())
+                    .block(
+                        Block::default()
+                            .title("Title")
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded),
+                    )
+                    .style(Style::default())
+                    .alignment(Alignment::Center),
+                chunks[2],
+            );
         })
         .ok();
 }
