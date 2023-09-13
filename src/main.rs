@@ -83,7 +83,10 @@ fn restore_terminal(
 fn get_todos(list_id: usize) -> Vec<Todo> {
     let todos = fetch_todos(list_id);
     return match todos {
-        Ok(todos) => todos,
+        Ok(mut todos) => {
+            todos.sort_by_key(|t| t.completed);
+            return todos;
+        },
         Err(_) => vec![],
     };
 }
@@ -102,6 +105,7 @@ fn run(
 ) -> Result<(), Box<dyn Error>> {
     let mut lists = get_lists();
     let mut todos = vec![];
+
     Ok(loop {
         match state.state {
             AppState::List => {
