@@ -8,5 +8,6 @@ edition = "2021"
 [dependencies]
 crossterm = "0.26"
 chrono = "0.4"
-ratatui = { version = "0.22.0", features = ["all-widgets"]}
+ratatui = { version = "0.22.0", features = ["all-widgets", "widget-calendar"] }
 rusqlite = "0.25.3"
+clap = { version = "4.4.8", features = ["derive"] }

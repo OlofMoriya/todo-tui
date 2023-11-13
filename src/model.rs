@@ -2,7 +2,7 @@ use chrono::NaiveDate;
 use std::vec::Vec;
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Todo {
     pub id: Option<usize>,
     pub list_id: usize,

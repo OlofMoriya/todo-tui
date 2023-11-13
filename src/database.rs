@@ -81,6 +81,33 @@ pub fn add_todo(todo: &Todo) -> SqlResult<()> {
     Ok(())
 }
 
+pub fn update_todo(todo: &Todo) -> SqlResult<()> {
+    let conn = open_db()?;
+
+    conn.execute(
+        "UPDATE todos SET 
+        list_id = ?2,
+        title = ?3,
+        description = ?4,
+        due_date = ?5,
+        completed = ?6,
+        completed_date = ?7
+        WHERE id = ?1
+        ",
+        params![
+            todo.id,
+            todo.list_id,
+            todo.title,
+            todo.description,
+            todo.due_date.map(|d| d.to_string()),
+            todo.completed,
+            todo.completed_date.map(|d| d.to_string())
+        ],
+    )?;
+
+    Ok(())
+}
+
 pub fn toggle_todo_completion(todo_id: usize, completed: bool) -> SqlResult<()> {
     let conn = open_db()?;
     let completed_date = if completed {
@@ -104,6 +131,33 @@ pub fn delete_todo(todo_id: usize) -> SqlResult<()> {
     let conn = open_db()?;
     conn.execute("DELETE FROM todos WHERE id = ?", params![todo_id])?;
     Ok(())
+}
+
+pub fn fetch_incomplete_todos(date: NaiveDate) -> SqlResult<Vec<Todo>> {
+    let conn = open_db()?;
+
+    // println!("{}", date.format( "%Y-%m-%d").to_string());
+    let mut stmt = conn.prepare("SELECT * FROM todos WHERE completed = false and due_date <= ?")?;
+    let rows = stmt.query_map(params![date.format( "%Y-%m-%d").to_string()], |row| {
+        Ok(Todo {
+            id: row.get(0)?,
+            list_id: row.get(1)?,
+            title: row.get(2)?,
+            description: row.get(3)?,
+            due_date: row
+                .get::<_, Option<String>>(4)?
+                .and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
+            completed: row.get(5)?,
+            completed_date: row
+                .get::<_, Option<String>>(6)?
+                .and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
+            dependencies: vec![], // Fetch dependencies if needed.
+        })
+    })?;
+
+    let todos: Vec<Todo> = rows.filter_map(Result::ok).collect();
+
+    Ok(todos)
 }
 
 pub fn fetch_todos(list_id: usize) -> SqlResult<Vec<Todo>> {
