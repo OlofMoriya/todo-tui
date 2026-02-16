@@ -213,3 +213,27 @@ pub fn fetch_lists() -> SqlResult<Vec<TodoList>> {
     let lists: Vec<TodoList> = rows.filter_map(Result::ok).collect();
     Ok(lists)
 }
+
+pub fn get_or_create_inbox() -> SqlResult<usize> {
+    let conn = open_db()?;
+    
+    // Try to find existing Inbox list
+    let mut stmt = conn.prepare("SELECT id FROM lists WHERE title = 'Inbox'")?;
+    let mut rows = stmt.query(params![])?;
+    
+    if let Some(row) = rows.next()? {
+        // Inbox exists, return its ID
+        let id: usize = row.get(0)?;
+        Ok(id)
+    } else {
+        // Inbox doesn't exist, create it
+        conn.execute(
+            "INSERT INTO lists (title) VALUES (?)",
+            params!["Inbox"],
+        )?;
+        
+        // Return the ID of the newly created Inbox
+        let id = conn.last_insert_rowid() as usize;
+        Ok(id)
+    }
+}

@@ -5,13 +5,16 @@ use std::{
     time::Duration,
 };
 
-use chrono::{Local, Days, NaiveDate};
+use chrono::{Days, Local, NaiveDate};
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use database::{add_list, add_todo, delete_list, delete_todo, fetch_lists, toggle_todo_completion, update_todo};
+use database::{
+    add_list, add_todo, delete_list, delete_todo, fetch_lists, get_or_create_inbox,
+    toggle_todo_completion, update_todo,
+};
 use model::{Todo, TodoList};
 use ratatui::{
     prelude::{Alignment, Constraint, CrosstermBackend, Direction, Layout},
@@ -55,35 +58,116 @@ struct State {
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
-    /// Return all incomplete todos
-    #[arg(short, long)]
-    date: Option<NaiveDate>,
-
-    /// Only return amount of incomplete todos
-    #[clap(short, long)]
-    count: bool,
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
+
+#[derive(clap::Subcommand, Debug)]
+enum Commands {
+    /// List incomplete todos
+    List {
+        /// Filter by due date
+        #[arg(short, long)]
+        date: Option<NaiveDate>,
+
+        /// Only return count of incomplete todos
+        #[arg(short, long)]
+        count: bool,
+    },
+    /// Add a new todo to the Inbox
+    Add {
+        /// Title of the todo
+        title: String,
+        /// description of the todo
+        #[arg(short = 'D', long)]
+        description: Option<String>,
+        /// Due date in days from now (e.g., 3 for 3 days from now)
+        #[arg(short, long)]
+        due: Option<u64>,
+    },
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
 
-    let args: Args = Args::parse(); 
-    let date = args.date;
-    let count = args.count;
-    if date.is_some() || count {
-        let todos = fetch_incomplete_todos(date.unwrap_or(Local::now().naive_local().date()));
-        match todos {
-            Ok(todos) =>
-                match count {
-                    true => println!("{}", todos.len()),
-                    false => { 
-                        todos.iter().for_each(|t| println!("{}\t{}\t{:?}", t.id.unwrap_or(0), t.due_date.expect("Has to have a date to be fetched"), t.title,));
+    match cli.command {
+        Some(Commands::List { date, count }) => {
+            let todos = fetch_incomplete_todos(date.unwrap_or(Local::now().naive_local().date()));
+            match todos {
+                Ok(todos) => {
+                    if count {
+                        println!("{}", todos.len());
+                    } else {
+                        todos.iter().for_each(|t| {
+                            println!(
+                                "{}\t{}\t{:?}",
+                                t.id.unwrap_or(0),
+                                t.due_date.expect("Has to have a date to be fetched"),
+                                t.title,
+                            )
+                        });
                     }
-                },
-            Err(e) => println!("Err: {:?}", e)
-        };
-        return Ok(()); 
-    } 
+                }
+                Err(e) => println!("Error: {:?}", e),
+            }
+            return Ok(());
+        }
+        Some(Commands::Add {
+            title,
+            description,
+            due,
+        }) => {
+            // Get or create the Inbox list
+            let inbox_id = match get_or_create_inbox() {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("Error creating/finding inbox: {:?}", e);
+                    std::process::exit(1);
+                }
+            };
 
+            // Calculate due date if provided
+            let due_date = due.map(|days| {
+                Local::now()
+                    .checked_add_days(Days::new(days))
+                    .expect("date in range")
+                    .naive_local()
+                    .date()
+            });
+
+            // Create the todo
+            let todo = Todo {
+                id: None,
+                list_id: inbox_id,
+                title: title.clone(),
+                description: description.clone(),
+                due_date,
+                completed: false,
+                completed_date: None,
+                dependencies: vec![],
+            };
+
+            match add_todo(&todo) {
+                Ok(_) => {
+                    println!("✓ Added todo '{}' to Inbox", title);
+                    if let Some(date) = due_date {
+                        println!("  Due: {}", date);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error adding todo: {:?}", e);
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        None => {
+            // No command provided, run TUI
+        }
+    }
+
+    // Run the TUI
     let state = State {
         state: AppState::List(None),
         list_title: "".to_string(),
@@ -124,7 +208,7 @@ fn get_todos(list_id: usize) -> Vec<Todo> {
             todos.sort_by_key(|t| !t.due_date.is_some());
             todos.sort_by_key(|t| t.completed);
             return todos;
-        },
+        }
         Err(_) => vec![],
     };
 }
@@ -169,26 +253,26 @@ fn run(
                         KeyCode::Char('q') => {
                             break;
                         }
-                        KeyCode::Char('v') => {
-                            match detail {
-                                Some(_) => state.state = AppState::List(None),
-                                None => {
-                                    match state.todo_list_state.selected() {
-                                        Some(index) => {state.state = AppState::List(Some(index))}
-                                        None => ()
-                                    }
-                                }
-                            }
-                        }
+                        KeyCode::Char('v') => match detail {
+                            Some(_) => state.state = AppState::List(None),
+                            None => match state.todo_list_state.selected() {
+                                Some(index) => state.state = AppState::List(Some(index)),
+                                None => (),
+                            },
+                        },
                         KeyCode::Char('E') => {
                             if state.lists_list_state.selected().is_some() {
                                 if let Some(edit_todo_index) = state.todo_list_state.selected() {
                                     let todo = &todos[edit_todo_index];
-                                    state.todo_description = todo.description.clone().unwrap_or("".to_string());
+                                    state.todo_description =
+                                        todo.description.clone().unwrap_or("".to_string());
                                     state.input = todo.title.clone();
                                     state.todo_title = todo.title.clone();
                                     state.todo_due_date = todo.due_date.clone();
-                                    state.state = AppState::Create(Some(InputField::Title), Some(edit_todo_index));
+                                    state.state = AppState::Create(
+                                        Some(InputField::Title),
+                                        Some(edit_todo_index),
+                                    );
                                 }
                             }
                         }
@@ -290,18 +374,30 @@ fn run(
                                 InputField::Title => {
                                     state.todo_title = state.input.clone();
                                     state.input = "".to_string();
-                                    state.state = AppState::Create(Some(InputField::Description), edit_todo_index);
+                                    state.state = AppState::Create(
+                                        Some(InputField::Description),
+                                        edit_todo_index,
+                                    );
                                 }
                                 InputField::Description => {
                                     state.todo_description = state.input.clone();
                                     state.input = "".to_string();
-                                    state.state = AppState::Create(Some(InputField::DueDate), edit_todo_index);
+                                    state.state = AppState::Create(
+                                        Some(InputField::DueDate),
+                                        edit_todo_index,
+                                    );
                                 }
                                 InputField::DueDate => {
                                     let duedatestring = state.input.clone();
                                     state.todo_due_date = match duedatestring.parse::<u64>() {
-                                        Ok(v) => Some(Local::now().checked_add_days(Days::new(v)).expect("in range").naive_local().date()),
-                                        Err(_) => None
+                                        Ok(v) => Some(
+                                            Local::now()
+                                                .checked_add_days(Days::new(v))
+                                                .expect("in range")
+                                                .naive_local()
+                                                .date(),
+                                        ),
+                                        Err(_) => None,
                                     };
                                     state.input = "".to_string();
                                     state.state = AppState::Create(None, edit_todo_index);
@@ -317,14 +413,19 @@ fn run(
                                 state.state = AppState::List(None);
                             }
                             KeyCode::Char('D') => {
-                                state.state = AppState::Create(Some(InputField::DueDate), edit_todo_index);
+                                state.state =
+                                    AppState::Create(Some(InputField::DueDate), edit_todo_index);
                             }
                             KeyCode::Char('d') => {
-                                state.state = AppState::Create(Some(InputField::Description), edit_todo_index);
+                                state.state = AppState::Create(
+                                    Some(InputField::Description),
+                                    edit_todo_index,
+                                );
                                 state.input = state.todo_description.clone();
                             }
                             KeyCode::Char('t') => {
-                                state.state = AppState::Create(Some(InputField::Title), edit_todo_index);
+                                state.state =
+                                    AppState::Create(Some(InputField::Title), edit_todo_index);
                                 state.input = state.todo_title.clone();
                             }
                             KeyCode::Char('s') => {
@@ -581,8 +682,9 @@ fn draw_lists(
     let todo_items: Vec<_> = todos
         .iter()
         .map(|todo: &Todo| {
-
-            let overdue = !todo.completed && todo.due_date.is_some() && todo.due_date.unwrap() <= Local::now().date_naive();
+            let overdue = !todo.completed
+                && todo.due_date.is_some()
+                && todo.due_date.unwrap() <= Local::now().date_naive();
 
             ListItem::new(Line::from(vec![Span::styled(
                 format!(
@@ -594,7 +696,10 @@ fn draw_lists(
                     },
                     todo.title.clone()
                 ),
-                Style::default().fg(match overdue { true => Color::Red, false => Color::White}),
+                Style::default().fg(match overdue {
+                    true => Color::Red,
+                    false => Color::White,
+                }),
             )]))
         })
         .collect();
@@ -611,31 +716,21 @@ fn draw_lists(
             let vert_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(2)
-                .constraints(
-                    [
-                        Constraint::Length(2),
-                        Constraint::Min(20),
-                    ]
-                    .as_ref(),
-                )
+                .constraints([Constraint::Length(2), Constraint::Min(20)].as_ref())
                 .split(size);
 
             let list_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .margin(2)
-                .constraints(
-                    [
-                        Constraint::Percentage(30),
-                        Constraint::Min(20),
-                    ]
-                    .as_ref(),
-                )
+                .constraints([Constraint::Percentage(30), Constraint::Min(20)].as_ref())
                 .split(vert_chunks[1]);
 
             frame.render_widget(
-                Paragraph::new("(N) new task, (L) new list, (h,j,k,l) move, (D) delete, (esc, q) exit")
-                    .style(Style::default())
-                    .alignment(Alignment::Center),
+                Paragraph::new(
+                    "(N) new task, (L) new list, (h,j,k,l) move, (D) delete, (esc, q) exit",
+                )
+                .style(Style::default())
+                .alignment(Alignment::Center),
                 vert_chunks[0],
             );
             frame.render_stateful_widget(lists_ui, list_chunks[0], &mut state.lists_list_state);
@@ -644,13 +739,12 @@ fn draw_lists(
         .ok();
 }
 
-
 fn draw_lists_with_details(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     lists: &Vec<TodoList>,
     todos: &Vec<Todo>,
     state: &mut State,
-    details_index: usize
+    details_index: usize,
 ) {
     let lists_items: Vec<_> = lists
         .iter()
@@ -712,19 +806,15 @@ fn draw_lists_with_details(
             let list_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .margin(2)
-                .constraints(
-                    [
-                        Constraint::Percentage(30),
-                        Constraint::Min(20),
-                    ]
-                    .as_ref(),
-                )
+                .constraints([Constraint::Percentage(30), Constraint::Min(20)].as_ref())
                 .split(vert_chunks[1]);
 
             frame.render_widget(
-                Paragraph::new("(N) new task, (L) new list, (h,j,k,l) move, (D) delete, (esc, q) exit")
-                    .style(Style::default())
-                    .alignment(Alignment::Center),
+                Paragraph::new(
+                    "(N) new task, (L) new list, (h,j,k,l) move, (D) delete, (esc, q) exit",
+                )
+                .style(Style::default())
+                .alignment(Alignment::Center),
                 vert_chunks[0],
             );
             frame.render_stateful_widget(lists_ui, list_chunks[0], &mut state.lists_list_state);
@@ -733,21 +823,20 @@ fn draw_lists_with_details(
             let selected_todo = todos.get(details_index);
             match selected_todo {
                 Some(v) => {
-
-            frame.render_widget(
-                Paragraph::new(v.title.clone())
-                    .style(Style::default())
-                    .alignment(Alignment::Center),
-                vert_chunks[2],
-            );
-            frame.render_widget(
-                Paragraph::new(v.description.clone().or(Some("".to_string())).expect("or"))
-                    .style(Style::default())
-                    .alignment(Alignment::Center),
-                vert_chunks[3],
-            );
-                },
-                None =>{}
+                    frame.render_widget(
+                        Paragraph::new(v.title.clone())
+                            .style(Style::default())
+                            .alignment(Alignment::Center),
+                        vert_chunks[2],
+                    );
+                    frame.render_widget(
+                        Paragraph::new(v.description.clone().or(Some("".to_string())).expect("or"))
+                            .style(Style::default())
+                            .alignment(Alignment::Center),
+                        vert_chunks[3],
+                    );
+                }
+                None => {}
             };
         })
         .ok();
@@ -836,11 +925,14 @@ fn draw_create_todo(
                 .alignment(Alignment::Center),
                 chunks[3],
             );
-            
+
             frame.render_widget(
                 Paragraph::new(match input_field {
                     Some(InputField::DueDate) => state.input.clone(),
-                    _ => match state.todo_due_date.clone(){ None => "".to_string(), Some(v) => v.to_string()},
+                    _ => match state.todo_due_date.clone() {
+                        None => "".to_string(),
+                        Some(v) => v.to_string(),
+                    },
                 })
                 .block(
                     Block::default()
