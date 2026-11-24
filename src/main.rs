@@ -12,8 +12,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use database::{
-    add_list, add_todo, delete_list, delete_todo, fetch_lists, get_or_create_inbox,
-    toggle_todo_completion, update_todo,
+    add_list, add_todo, delete_list, delete_todo, fetch_lists, toggle_todo_completion, update_todo,
 };
 use model::{Todo, TodoList};
 use ratatui::{
@@ -24,7 +23,9 @@ use ratatui::{
     Terminal,
 };
 
-use crate::database::{fetch_incomplete_todos, fetch_todos};
+use crate::database::fetch_todos;
+
+mod cli;
 
 mod database;
 mod model;
@@ -56,118 +57,17 @@ struct State {
     pub selecting_list: bool,
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(clap::Subcommand, Debug)]
-enum Commands {
-    /// List incomplete todos
-    List {
-        /// Filter by due date
-        #[arg(short, long)]
-        date: Option<NaiveDate>,
-
-        /// Only return count of incomplete todos
-        #[arg(short, long)]
-        count: bool,
-    },
-    /// Add a new todo to the Inbox
-    Add {
-        /// Title of the todo
-        title: String,
-        /// description of the todo
-        #[arg(short = 'D', long)]
-        description: Option<String>,
-        /// Due date in days from now (e.g., 3 for 3 days from now)
-        #[arg(short, long)]
-        due: Option<u64>,
-    },
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let cli = Cli::parse();
-
-    match cli.command {
-        Some(Commands::List { date, count }) => {
-            let todos = fetch_incomplete_todos(date.unwrap_or(Local::now().naive_local().date()));
-            match todos {
-                Ok(todos) => {
-                    if count {
-                        println!("{}", todos.len());
-                    } else {
-                        todos.iter().for_each(|t| {
-                            println!(
-                                "{}\t{}\t{:?}",
-                                t.id.unwrap_or(0),
-                                t.due_date.expect("Has to have a date to be fetched"),
-                                t.title,
-                            )
-                        });
-                    }
-                }
-                Err(e) => println!("Error: {:?}", e),
-            }
-            return Ok(());
-        }
-        Some(Commands::Add {
-            title,
-            description,
-            due,
-        }) => {
-            // Get or create the Inbox list
-            let inbox_id = match get_or_create_inbox() {
-                Ok(id) => id,
-                Err(e) => {
-                    eprintln!("Error creating/finding inbox: {:?}", e);
-                    std::process::exit(1);
-                }
-            };
-
-            // Calculate due date if provided
-            let due_date = due.map(|days| {
-                Local::now()
-                    .checked_add_days(Days::new(days))
-                    .expect("date in range")
-                    .naive_local()
-                    .date()
-            });
-
-            // Create the todo
-            let todo = Todo {
-                id: None,
-                list_id: inbox_id,
-                title: title.clone(),
-                description: description.clone(),
-                due_date,
-                completed: false,
-                completed_date: None,
-                dependencies: vec![],
-            };
-
-            match add_todo(&todo) {
-                Ok(_) => {
-                    println!("✓ Added todo '{}' to Inbox", title);
-                    if let Some(date) = due_date {
-                        println!("  Due: {}", date);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error adding todo: {:?}", e);
-                    std::process::exit(1);
-                }
-            }
-            return Ok(());
-        }
-        None => {
-            // No command provided, run TUI
+fn main() -> std::process::ExitCode {
+    match cli::Cli::parse().run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("todo-tui: {error}");
+            std::process::ExitCode::FAILURE
         }
     }
+}
 
-    // Run the TUI
+fn run_tui() -> Result<(), Box<dyn Error>> {
     let state = State {
         state: AppState::List(None),
         list_title: "".to_string(),
@@ -180,9 +80,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         selecting_list: true,
     };
     let mut terminal = setup_terminal()?;
-    run(&mut terminal, state)?;
-    restore_terminal(&mut terminal)?;
-    Ok(())
+    let result = run(&mut terminal, state);
+    let restored = restore_terminal(&mut terminal);
+    result.and(restored)
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, Box<dyn Error>> {
@@ -201,16 +101,7 @@ fn restore_terminal(
 }
 
 fn get_todos(list_id: usize) -> Vec<Todo> {
-    let todos = fetch_todos(list_id);
-    return match todos {
-        Ok(mut todos) => {
-            todos.sort_by_key(|t| t.due_date);
-            todos.sort_by_key(|t| !t.due_date.is_some());
-            todos.sort_by_key(|t| t.completed);
-            return todos;
-        }
-        Err(_) => vec![],
-    };
+    fetch_todos(list_id).unwrap_or_default()
 }
 
 fn get_lists() -> Vec<TodoList> {
@@ -505,7 +396,10 @@ fn run(
 }
 
 fn save_todo_list(title: String) {
-    let list = TodoList { title, id: None };
+    let list = TodoList {
+        title,
+        ..TodoList::default()
+    };
     add_list(&list).ok();
 }
 
@@ -518,7 +412,7 @@ fn save_todo(state: &State, list_id: usize) {
         due_date: state.todo_due_date.clone(),
         completed: false,
         completed_date: None,
-        dependencies: vec![],
+        ..Todo::default()
     };
     add_todo(&todo).ok();
 }
