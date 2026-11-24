@@ -11,7 +11,7 @@ Cycle **Pinned**, **Lists**, **Today**, and **Trash** with Tab or Shift-Tab. Use
 - `N` adds a task (Inbox is the default); `L` creates a list. In the Lists pane, `R` renames and `D` moves a list to Trash.
 - In a task pane, `E` edits, `p` pins or changes the avatar, `u` unpins, `n` toggles Next, and `m` moves the task.
 - Space completes or reopens a task; `o` edits the completion note. `D` moves a task to Trash. In the Trash tab, use `R` to restore or `P` to permanently delete after typing `yes`.
-- Adds, pins, and other writes from another local process appear automatically. With SSH sync enabled and the first import approved, the TUI checks the master at startup and every five seconds in the background. Press `S` to check now.
+- Adds, pins, and other writes from another local process appear automatically. Press `s` to review sync activity and before/after changes, or `S` to sync now. The footer flags new sync activity and sync problems.
 
 ## CLI examples
 
@@ -57,16 +57,14 @@ Trash is hidden from regular lists, Today, and Pinned. `show` still works for a 
 ## Optional SSH sync
 
 1. Install the same `todo-tui` version on the Mac mini and MacBook. Upgrade both to 0.3.0 or newer before syncing Trash; older peers are rejected. Enable macOS Remote Login on the mini. As the MacBook user, verify the mini's host key and set up key-based SSH so `ssh -o BatchMode=yes mini true` succeeds. Use your SSH config for an alias, custom port, or IPv6 address.
-2. On the MacBook, configure the mini, preview the first import, and approve it:
+2. On the MacBook, configure the mini. This starts the first sync immediately and installs a macOS login agent that checks every ten seconds while you are logged in, even with the TUI closed. Run the same command again to install the agent for an existing configuration.
 
    ```sh
    todo-tui sync configure mini --remote-bin /opt/homebrew/bin/todo-tui
-   todo-tui sync preview
-   todo-tui sync --accept-import
    ```
 
-   Use the mini's actual executable path (`/usr/local/bin/todo-tui` on many Intel Macs); omit `--remote-bin` if SSH can already find it on the mini's PATH. The remote command uses the SSH account's `~/.todo/todos.sqlite`. SQLite backups are created beside both databases as `todos.sqlite.pre-ssh-sync.sqlite` before the first import; they are not overwritten. The preview does not change task/list contents. If either database changes after the preview, approval shows a fresh preview instead of applying it. Existing records are matched by stable IDs, not by their titles or old integer IDs. Each machine keeps its own Inbox ID.
-3. Run `todo-tui sync` whenever you want to push and pull from the shell. `todo-tui sync status --json` reports the pending local changes, last successful sync and reachability from the last check. `todo-tui sync off` stops future connections and retains the baseline. Your tasks stay local and editable while disconnected. The mini doesn't need a separate daemon beyond OpenSSH.
+   Use the mini's actual executable path (`/usr/local/bin/todo-tui` on many Intel Macs); omit `--remote-bin` if SSH can already find it on the mini's PATH. The remote command uses the SSH account's `~/.todo/todos.sqlite`. SQLite backups are created beside both databases as `todos.sqlite.pre-ssh-sync.sqlite` before the first import; they are not overwritten. To review the first import manually instead, configure with `--preview-only`, then run `todo-tui sync preview` and `todo-tui sync --accept-import`. If either database changes after a manual preview, approval shows a fresh preview instead of applying it. Existing records are matched by stable IDs, not by their titles or old integer IDs. Each machine keeps its own Inbox ID.
+3. Run `todo-tui sync` whenever you want to push and pull from the shell. `todo-tui sync status --json` reports the pending local changes, last successful sync and reachability from the last check. `todo-tui sync log --json` shows recent transfers (including before/after values), conflicts, and failures. History is stored locally and retains the last 50 events. `todo-tui sync off` removes the login agent, stops future connections, and retains the baseline. Your tasks stay local and editable while disconnected. The mini doesn't need a separate daemon beyond OpenSSH.
 
 If both sides change the same task or list, sync pauses without replacing either version. Inspect them with `todo-tui sync conflicts --json`, then run `todo-tui sync resolve 'task:<id>' local` (or `master`), followed by `todo-tui sync`. For a first-import conflict, follow up with `sync --accept-import` instead. `list:<id>` identifies a list conflict. A list deletion that would orphan a task must be resolved by keeping the list or moving/deleting the remaining task first. `preview`, `conflicts`, and `retry` are normal sync outcomes; use `--json` to distinguish them from `synced`. Transport and local errors use exit status `1`.
 

@@ -27,6 +27,8 @@ use rusqlite::Connection;
 use crate::{
     database::{self as db, Change, Query, Result, TrashAction, TrashFilter},
     model::{Pin, Todo, TodoList},
+    snapshot::Record,
+    sync_log::{self, Event as SyncEvent, Kind as SyncKind},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -75,6 +77,68 @@ struct Ui {
     form: Option<Form>,
     status: String,
     sync_status: String,
+    sync_notice: String,
+    activity: Option<Activity>,
+}
+
+#[derive(Default)]
+struct Activity {
+    events: Vec<SyncEvent>,
+    list: ListState,
+    scroll: u16,
+}
+
+impl Activity {
+    fn selected(&self) -> Option<&SyncEvent> {
+        self.events.get(self.list.selected()?)
+    }
+
+    fn load(&mut self, conn: &Connection) -> Result<()> {
+        let events = sync_log::recent(conn, 50)?;
+        let selected = keep(
+            self.selected().map(|e| e.id),
+            events.iter().map(|e| e.id),
+            self.list.selected(),
+        );
+        self.events = events;
+        self.list.select(selected);
+        Ok(())
+    }
+
+    fn key(&mut self, conn: &Connection, key: KeyCode) -> Result<()> {
+        if self.events.is_empty() {
+            return Ok(());
+        }
+        let current = self.list.selected().unwrap_or(0);
+        let index = match key {
+            KeyCode::Up | KeyCode::Char('k') => current.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => (current + 1).min(self.events.len() - 1),
+            KeyCode::Home => 0,
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(5);
+                return Ok(());
+            }
+            KeyCode::PageDown => {
+                let limit = self
+                    .selected()
+                    .map_or(0, |e| activity_details(e).lines().count().saturating_sub(1));
+                self.scroll = self
+                    .scroll
+                    .saturating_add(5)
+                    .min(u16::try_from(limit).unwrap_or(u16::MAX));
+                return Ok(());
+            }
+            _ => return Ok(()),
+        };
+        if index != current {
+            self.scroll = 0;
+        }
+        self.list.select(Some(index));
+        if index == 0 {
+            sync_log::mark_seen(conn, self.events[0].id)?;
+        }
+        Ok(())
+    }
 }
 
 impl Ui {
@@ -142,6 +206,22 @@ impl Ui {
         Ok(())
     }
 
+    fn refresh_activity(&mut self, conn: &Connection) -> Result<()> {
+        self.sync_notice = match sync_log::head(conn)? {
+            Some(event) if event.entry.kind != SyncKind::Synced => {
+                format!("{} • s review sync activity", event.entry.message)
+            }
+            Some(event) if event.id > sync_log::last_seen(conn)? => {
+                format!("{} • s review new activity", event.entry.message)
+            }
+            _ => String::new(),
+        };
+        if let Some(activity) = &mut self.activity {
+            activity.load(conn)?;
+        }
+        Ok(())
+    }
+
     fn handle(&mut self, conn: &mut Connection, key: KeyEvent) -> Result<bool> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Ok(false);
@@ -157,10 +237,26 @@ impl Ui {
             }
             return Ok(true);
         }
+        if let Some(activity) = &mut self.activity {
+            match key.code {
+                KeyCode::Char('q') => return Ok(false),
+                KeyCode::Char('s') | KeyCode::Esc => self.activity = None,
+                code => activity.key(conn, code)?,
+            }
+            return Ok(true);
+        }
         let lists = self.view.has_list_pane() && self.on_lists;
         match key.code {
             KeyCode::Char('q') => return Ok(false),
             KeyCode::Char('v') => self.show_details = !self.show_details,
+            KeyCode::Char('s') => {
+                let mut activity = Activity::default();
+                activity.load(conn)?;
+                if let Some(event) = activity.selected() {
+                    sync_log::mark_seen(conn, event.id)?;
+                }
+                self.activity = Some(activity);
+            }
             KeyCode::Tab | KeyCode::BackTab => {
                 self.view = self.view.cycle(
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
@@ -606,6 +702,94 @@ fn detail(t: &Todo) -> String {
     text
 }
 
+fn activity_details(event: &SyncEvent) -> String {
+    let mut text = format!(
+        "{}\n{}",
+        safe(&event.at),
+        safe_multiline(&event.entry.message)
+    );
+    for (direction, changes) in [
+        ("From mini", &event.entry.downloaded),
+        ("To mini", &event.entry.uploaded),
+    ] {
+        for change in changes {
+            let title = match change.after.as_ref().or(change.before.as_ref()) {
+                Some(Record::List { title, .. } | Record::Task { title, .. }) => safe(title),
+                None => String::new(),
+            };
+            let kind = match (&change.before, &change.after) {
+                (None, _) => "added",
+                (_, None) => "removed",
+                _ => "updated",
+            };
+            text.push_str(&format!(
+                "\n\n{direction}: {kind} {title}\n{}",
+                safe(&change.key)
+            ));
+            let before = serde_json::to_value(&change.before).unwrap_or_default();
+            let after = serde_json::to_value(&change.after).unwrap_or_default();
+            let fields = before.as_object().or_else(|| after.as_object());
+            if let Some(fields) = fields {
+                for field in fields.keys().filter(|key| key.as_str() != "kind") {
+                    let old = &before[field];
+                    let new = &after[field];
+                    if old == new {
+                        continue;
+                    }
+                    match (&change.before, &change.after) {
+                        (None, _) => text.push_str(&format!("\n  {field}: {new}")),
+                        (_, None) => text.push_str(&format!("\n  {field}: {old}")),
+                        _ => text.push_str(&format!("\n  {field}: {old} → {new}")),
+                    }
+                }
+            }
+        }
+    }
+    text
+}
+
+fn draw_activity<B: Backend>(
+    frame: &mut Frame<B>,
+    area: ratatui::layout::Rect,
+    activity: &mut Activity,
+    accent: Style,
+) {
+    let panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length((area.height / 3).max(3).min(area.height)),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    let rows: Vec<_> = activity
+        .events
+        .iter()
+        .map(|e| ListItem::new(format!("{}  {}", safe(&e.at), safe(&e.entry.message))))
+        .collect();
+    frame.render_stateful_widget(
+        List::new(rows)
+            .block(
+                Block::default()
+                    .title("Sync activity")
+                    .borders(Borders::ALL),
+            )
+            .highlight_symbol("› ")
+            .highlight_style(accent),
+        panes[0],
+        &mut activity.list,
+    );
+    let detail = activity
+        .selected()
+        .map_or_else(|| "No sync activity yet".into(), activity_details);
+    frame.render_widget(
+        Paragraph::new(detail)
+            .block(Block::default().title("Sync review").borders(Borders::ALL))
+            .scroll((activity.scroll, 0))
+            .wrap(Wrap { trim: false }),
+        panes[1],
+    );
+}
+
 fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
     let accent = Style::default()
         .fg(Color::Cyan)
@@ -656,6 +840,14 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
                 safe(&ui.status)
             ))
             .wrap(Wrap { trim: false }),
+            outer[2],
+        );
+        return;
+    }
+    if let Some(activity) = &mut ui.activity {
+        draw_activity(frame, outer[1], activity, accent);
+        frame.render_widget(
+            Paragraph::new("↑↓ events • PgUp/PgDn details • Home latest • s/Esc close"),
             outer[2],
         );
         return;
@@ -771,9 +963,9 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
     };
     frame.render_widget(
         Paragraph::new(format!(
-            "Tab/Shift-Tab views • hjkl/↑↓ navigate • v details • S sync • q quit\n{actions}\n{}\n{}",
+            "Tab/Shift-Tab views • hjkl/↑↓ navigate • v details • s activity • S sync • q quit\n{actions}\n{}\n{}",
             safe(&ui.status),
-            safe(&ui.sync_status)
+            safe(if ui.sync_notice.is_empty() { &ui.sync_status } else { &ui.sync_notice })
         ))
         .wrap(Wrap { trim: false }),
         outer[2],
@@ -808,7 +1000,9 @@ impl SyncWorker {
         thread::spawn(move || {
             while let Ok(mode) = jobs.recv() {
                 let outcome = (|| -> Result<Option<String>> {
-                    if mode == Mode::Automatic && !sync::automatic_ready()? {
+                    if mode == Mode::Automatic
+                        && (!sync::automatic_ready()? || crate::sync_background::active())
+                    {
                         return Ok(None);
                     }
                     Ok(Some(sync::run(mode)?.message()))
@@ -855,12 +1049,14 @@ fn data_version(conn: &Connection) -> rusqlite::Result<i64> {
 
 pub fn run() -> Result<()> {
     let mut conn = db::open_db()?;
+    sync_log::init(&conn)?;
     let mut ui = Ui {
         on_lists: true,
         ..Ui::default()
     };
     let mut version = data_version(&conn)?;
     ui.refresh(&conn)?;
+    ui.refresh_activity(&conn)?;
     let mut refreshed = Instant::now();
     enable_raw_mode()?;
     let _tty = Tty;
@@ -904,7 +1100,7 @@ pub fn run() -> Result<()> {
         }
         let latest = data_version(&conn)?;
         if input_changed || latest != version || refreshed.elapsed() >= Duration::from_secs(30) {
-            match ui.refresh(&conn) {
+            match ui.refresh(&conn).and_then(|()| ui.refresh_activity(&conn)) {
                 Ok(()) => {
                     version = latest;
                     refreshed = Instant::now();
@@ -964,6 +1160,52 @@ mod tests {
         assert_ne!(data_version(&reader).unwrap(), pinned);
         ui.refresh(&reader).unwrap();
         assert!(ui.rows.is_empty());
+    }
+
+    #[test]
+    fn sync_activity_announces_and_reviews_downloads() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        sync_log::init(&conn).unwrap();
+        let change = crate::snapshot::Delta {
+            key: "list:test".into(),
+            before: Some(Record::List {
+                title: "Before".into(),
+                trashed_at: None,
+            }),
+            after: Some(Record::List {
+                title: "After".into(),
+                trashed_at: None,
+            }),
+        };
+        sync_log::write(
+            &conn,
+            sync_log::Entry {
+                kind: SyncKind::Synced,
+                message: "Downloaded one change".into(),
+                uploaded: vec![],
+                downloaded: vec![change],
+            },
+        )
+        .unwrap();
+        let mut ui = Ui::default();
+        ui.refresh_activity(&conn).unwrap();
+        assert!(ui.sync_notice.contains("review new activity"));
+        ui.handle(
+            &mut conn,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        )
+        .unwrap();
+        let event = ui.activity.as_ref().unwrap().selected().unwrap();
+        assert!(activity_details(event).contains("\"Before\" → \"After\""));
+        ui.refresh_activity(&conn).unwrap();
+        assert!(ui.sync_notice.is_empty());
+        sync_log::write(
+            &conn,
+            sync_log::Entry::issue(SyncKind::Error, "Master offline".into()),
+        )
+        .unwrap();
+        ui.refresh_activity(&conn).unwrap();
+        assert!(ui.sync_notice.contains("Master offline"));
     }
 
     #[test]

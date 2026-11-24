@@ -155,10 +155,12 @@ pub enum Command {
     #[command(args_conflicts_with_subcommands = true)]
     Sync {
         /// Apply the reviewed first-import preview
-        #[arg(long, conflicts_with = "stdio")]
+        #[arg(long, conflicts_with_all = ["stdio", "automatic"])]
         accept_import: bool,
-        #[arg(long, hide = true)]
+        #[arg(long, hide = true, conflicts_with = "automatic")]
         stdio: bool,
+        #[arg(long, hide = true)]
+        automatic: bool,
         #[command(subcommand)]
         action: Option<crate::sync::SyncAction>,
     },
@@ -288,9 +290,10 @@ impl Cli {
             action,
             accept_import,
             stdio,
+            automatic,
         } = command
         {
-            return crate::sync::cli(action, accept_import, stdio, json);
+            return crate::sync::cli(action, accept_import, stdio, automatic, json);
         }
         let mut conn = db::open_db()?;
         match command {

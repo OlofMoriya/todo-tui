@@ -5,6 +5,8 @@ mod database;
 mod model;
 mod snapshot;
 mod sync;
+mod sync_background;
+mod sync_log;
 mod sync_transport;
 mod tui;
 

@@ -8,21 +8,27 @@ use serde::{Deserialize, Serialize};
 use crate::{
     database::{self as db, Result},
     snapshot::{self, Delta, Record, Snapshot},
+    sync_log::{self, Entry, Kind},
     sync_transport::{self as ssh, Attempt, Target},
 };
 
 #[derive(Subcommand)]
 pub enum SyncAction {
-    /// Configure the client. Does not connect until you run a preview.
+    /// Configure the client and start syncing automatically
     Configure {
         host: String,
         #[arg(long, default_value = "todo-tui")]
         remote_bin: String,
+        /// Require manual approval for the first import
+        #[arg(long)]
+        preview_only: bool,
     },
     /// Disable all client SSH connections, keeping the existing baseline
     Off,
     /// Show the stored status without connecting
     Status,
+    /// Review recent transfers and sync issues
+    Log,
     /// Show exactly what the first import would push and pull
     Preview,
     /// Inspect both versions (and the prior baseline) of each conflict
@@ -62,6 +68,8 @@ struct Preview {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct State {
     target: Option<Target>,
+    #[serde(default)]
+    automatic_import: bool,
     master: Option<String>,
     base: Option<Snapshot>,
     preview: Option<Preview>,
@@ -74,7 +82,7 @@ struct State {
 
 pub fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS sync_client(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL)")?;
-    Ok(())
+    sync_log::init(conn)
 }
 
 fn load(conn: &Connection) -> Result<State> {
@@ -254,6 +262,28 @@ fn open_state() -> Result<Connection> {
     Ok(conn)
 }
 
+fn success(tx: &Connection, uploaded: Vec<Delta>, downloaded: Vec<Delta>) -> Result<Outcome> {
+    let outcome = Outcome::Synced {
+        uploaded: uploaded.len(),
+        downloaded: downloaded.len(),
+    };
+    if !uploaded.is_empty()
+        || !downloaded.is_empty()
+        || sync_log::head(tx)?.is_none_or(|event| event.entry.kind != Kind::Synced)
+    {
+        sync_log::write(
+            tx,
+            Entry {
+                kind: Kind::Synced,
+                message: outcome.message(),
+                uploaded,
+                downloaded,
+            },
+        )?;
+    }
+    Ok(outcome)
+}
+
 fn finalize(conn: &mut Connection, state: &State, attempt: &Attempt) -> Result<Outcome> {
     let mut outcome = Outcome::Retry;
     update(conn, |tx, s| {
@@ -274,10 +304,11 @@ fn finalize(conn: &mut Connection, state: &State, attempt: &Attempt) -> Result<O
         s.pending = None;
         s.preview = None;
         s.conflicts.clear();
-        outcome = Outcome::Synced {
-            uploaded: snapshot::delta(&attempt.expected, &attempt.desired).len(),
-            downloaded: snapshot::delta(&local, &desired).len(),
-        };
+        outcome = success(
+            tx,
+            snapshot::delta(&attempt.expected, &attempt.desired),
+            snapshot::delta(&local, &desired),
+        )?;
         Ok(())
     })?;
     Ok(outcome)
@@ -292,7 +323,11 @@ fn cycle(
     let Some(target) = initial.target.as_ref() else {
         return Ok(Outcome::Off);
     };
-    if mode == Mode::Automatic && initial.base.is_none() && initial.pending.is_none() {
+    if mode == Mode::Automatic
+        && !initial.automatic_import
+        && initial.base.is_none()
+        && initial.pending.is_none()
+    {
         return Ok(Outcome::AwaitingPreview);
     }
     if mode == Mode::Preview && (initial.base.is_some() || initial.pending.is_some()) {
@@ -383,10 +418,7 @@ fn cycle(
             s.preview = None;
             s.conflicts.clear();
             s.last_success = Some(Utc::now().to_rfc3339());
-            result = Some(Outcome::Synced {
-                uploaded: 0,
-                downloaded: 0,
-            });
+            result = Some(success(tx, vec![], vec![])?);
             return Ok(());
         }
         let attempt = Attempt {
@@ -424,17 +456,46 @@ pub fn run(mode: Mode) -> Result<Outcome> {
     let mut conn = open_state()?;
     let state = load(&conn)?;
     let mut reachable = None;
-    let attempt = cycle(&mut conn, state.clone(), mode, &mut reachable);
-    if let Err(e) = &attempt {
-        let _ = update(&mut conn, |_, current| {
+    let attempt = (|| -> Result<Outcome> {
+        let result = cycle(&mut conn, state.clone(), mode, &mut reachable)?;
+        if mode == Mode::Automatic
+            && state.automatic_import
+            && matches!(result, Outcome::Preview { .. })
+        {
+            let reviewed = load(&conn)?;
+            if reviewed.target == state.target
+                && reviewed.automatic_import
+                && reviewed.base.is_none()
+            {
+                return cycle(&mut conn, reviewed, Mode::Accept, &mut reachable);
+            }
+        }
+        Ok(result)
+    })();
+    let issue = match &attempt {
+        Err(e) => Some(Entry::issue(Kind::Error, e.to_string())),
+        Ok(outcome @ Outcome::Conflicts { .. }) => {
+            Some(Entry::issue(Kind::Conflicts, outcome.message()))
+        }
+        Ok(outcome @ Outcome::Retry) => Some(Entry::issue(Kind::Retry, outcome.message())),
+        _ => None,
+    };
+    if let Some(issue) = issue {
+        let logged = update(&mut conn, |tx, current| {
             if current.target == state.target && current.target.is_some() {
-                if reachable.is_some() {
-                    current.reachable = reachable;
+                if issue.kind == Kind::Error {
+                    if reachable.is_some() {
+                        current.reachable = reachable;
+                    }
+                    current.last_error = Some(issue.message.clone());
                 }
-                current.last_error = Some(e.to_string());
+                sync_log::write(tx, issue)?;
             }
             Ok(())
         });
+        if attempt.is_ok() {
+            logged?;
+        }
     }
     attempt
 }
@@ -442,6 +503,7 @@ pub fn run(mode: Mode) -> Result<Outcome> {
 #[derive(Serialize)]
 struct Status {
     target: Option<Target>,
+    background_active: bool,
     first_import_pending: bool,
     pending_changes: Option<usize>,
     pending_attempt: bool,
@@ -468,6 +530,7 @@ fn status(conn: &mut Connection) -> Result<Status> {
     };
     Ok(Status {
         first_import_pending: s.target.is_some() && s.base.is_none(),
+        background_active: s.target.is_some() && crate::sync_background::active(),
         target: s.target,
         pending_changes,
         pending_attempt: s.pending.is_some(),
@@ -481,10 +544,16 @@ fn status(conn: &mut Connection) -> Result<Status> {
 pub fn automatic_ready() -> Result<bool> {
     let conn = open_state()?;
     let s = load(&conn)?;
-    Ok(s.target.is_some() && (s.base.is_some() || s.pending.is_some()))
+    Ok(s.target.is_some() && (s.automatic_import || s.base.is_some() || s.pending.is_some()))
 }
 
-pub fn cli(action: Option<SyncAction>, accept: bool, stdio: bool, json: bool) -> Result<()> {
+pub fn cli(
+    action: Option<SyncAction>,
+    accept: bool,
+    stdio: bool,
+    automatic: bool,
+    json: bool,
+) -> Result<()> {
     if stdio {
         return ssh::serve();
     }
@@ -502,6 +571,8 @@ pub fn cli(action: Option<SyncAction>, accept: bool, stdio: bool, json: bool) ->
                 Mode::Preview
             } else if accept {
                 Mode::Accept
+            } else if automatic {
+                Mode::Automatic
             } else {
                 Mode::Normal
             };
@@ -537,7 +608,11 @@ pub fn cli(action: Option<SyncAction>, accept: bool, stdio: bool, json: bool) ->
                 }
             })
         }
-        Some(SyncAction::Configure { host, remote_bin }) => {
+        Some(SyncAction::Configure {
+            host,
+            remote_bin,
+            preview_only,
+        }) => {
             let target = Target::new(host, remote_bin)?;
             let mut conn = db::open(true)?;
             init(&conn)?;
@@ -559,13 +634,40 @@ pub fn cli(action: Option<SyncAction>, accept: bool, stdio: bool, json: bool) ->
                     s.reachable = None;
                     s.last_error = None;
                 }
+                s.automatic_import = !preview_only;
                 Ok(())
             })?;
-            out(&target, json, || {
-                println!(
-                    "SSH master: {}. Run `todo-tui sync preview` for the first import.",
-                    target.host
-                )
+            let first = if preview_only {
+                Ok(None)
+            } else {
+                run(Mode::Automatic).map(Some)
+            };
+            let background_active = crate::sync_background::enable()?;
+            let first = first?;
+            #[derive(Serialize)]
+            struct Configured<'a> {
+                #[serde(flatten)]
+                target: &'a Target,
+                background_active: bool,
+                sync: Option<Outcome>,
+            }
+            let configured = Configured {
+                target: &target,
+                background_active,
+                sync: first,
+            };
+            out(&configured, json, || {
+                println!("SSH master: {}", target.host);
+                if let Some(outcome) = &configured.sync {
+                    println!("{}", outcome.message());
+                } else {
+                    println!("Run `todo-tui sync preview` for the first import.");
+                }
+                if background_active {
+                    println!("Background sync is active, even when the TUI is closed.");
+                } else {
+                    println!("No login agent is running right now. The open TUI can sync in the background.");
+                }
             })
         }
         Some(SyncAction::Off) => {
@@ -577,6 +679,7 @@ pub fn cli(action: Option<SyncAction>, accept: bool, stdio: bool, json: bool) ->
                 s.last_error = None;
                 Ok(())
             })?;
+            crate::sync_background::disable()?;
             out(&Outcome::Off, json, || {
                 println!("SSH sync is off; local tasks and the sync baseline are unchanged")
             })
@@ -587,6 +690,14 @@ pub fn cli(action: Option<SyncAction>, accept: bool, stdio: bool, json: bool) ->
                 println!(
                     "Master: {}",
                     s.target.as_ref().map_or("off", |t| t.host.as_str())
+                );
+                println!(
+                    "Background login agent: {}",
+                    if s.background_active {
+                        "active"
+                    } else {
+                        "inactive"
+                    }
                 );
                 println!(
                     "Reachable (last check): {}",
@@ -609,6 +720,17 @@ pub fn cli(action: Option<SyncAction>, accept: bool, stdio: bool, json: bool) ->
                 }
                 if let Some(e) = &s.last_error {
                     println!("Last error: {e}");
+                }
+            })
+        }
+        Some(SyncAction::Log) => {
+            let rows = sync_log::recent(&open_state()?, 50)?;
+            out(&rows, json, || {
+                if rows.is_empty() {
+                    println!("No sync activity yet");
+                }
+                for event in &rows {
+                    println!("{}  {}", event.at, event.entry.message);
                 }
             })
         }

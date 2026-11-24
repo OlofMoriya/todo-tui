@@ -97,7 +97,7 @@ fi
             .count()
     }
     fn first_sync(&self) {
-        self.local(&["sync", "configure", "mini"]);
+        self.local(&["sync", "configure", "mini", "--preview-only"]);
         assert_eq!(self.local(&["sync", "preview"])["outcome"], "preview");
         assert_eq!(
             self.local(&["sync", "--accept-import"])["outcome"],
@@ -133,6 +133,28 @@ fn key(prefix: &str, id: &str) -> String {
 }
 
 #[test]
+fn configure_imports_and_logs_changes_and_issues() {
+    let p = Pair::new();
+    p.master(&["add", "On master"]);
+    let configured = p.local(&["sync", "configure", "mini"]);
+    assert_eq!(configured["sync"]["outcome"], "synced");
+    assert_eq!(p.local(&["list"])[0]["title"], "On master");
+    let log = p.local(&["sync", "log"]);
+    assert_eq!(log[0]["downloaded"][0]["after"]["title"], "On master");
+    for _ in 0..2 {
+        expect_error(
+            p.command(false, &["sync", "--automatic"], "offline"),
+            "simulated offline",
+        );
+    }
+    let log = p.local(&["sync", "log"]);
+    assert_eq!(rows(&log), 2);
+    assert_eq!(log[0]["kind"], "error");
+    assert_eq!(p.local(&["sync", "--automatic"])["outcome"], "synced");
+    assert_eq!(p.local(&["sync", "log"])[0]["kind"], "synced");
+}
+
+#[test]
 fn first_import_backs_up_both_legacy_databases_and_requires_current_preview() {
     let p = Pair::new();
     for (path, title) in [(&p.local, "Client task"), (&p.remote, "Master task")] {
@@ -147,7 +169,7 @@ fn first_import_backs_up_both_legacy_databases_and_requires_current_preview() {
         )
         .unwrap();
     }
-    p.local(&["sync", "configure", "mini"]);
+    p.local(&["sync", "configure", "mini", "--preview-only"]);
     assert_eq!(p.count_ssh(), 0);
     let preview = p.local(&["sync", "preview"]);
     assert_eq!(rows(&preview["upload"]), 1);
