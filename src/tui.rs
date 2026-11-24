@@ -41,8 +41,8 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 4] = [Self::Pinned, Self::Lists, Self::Today, Self::Trash];
-    const TITLES: [&'static str; 4] = ["Pinned", "Lists", "Today", "Trash"];
+    const ALL: [Self; 3] = [Self::Pinned, Self::Lists, Self::Today];
+    const TITLES: [&'static str; 3] = ["Pinned", "Lists", "Today"];
     fn has_list_pane(self) -> bool {
         matches!(self, Self::Lists | Self::Trash)
     }
@@ -68,6 +68,7 @@ impl Row {
 #[derive(Default)]
 struct Ui {
     view: View,
+    trash_return: Option<BrowserPosition>,
     on_lists: bool,
     show_details: bool,
     lists: Vec<TodoList>,
@@ -79,6 +80,15 @@ struct Ui {
     sync_status: String,
     sync_notice: String,
     activity: Option<Activity>,
+}
+
+struct BrowserPosition {
+    view: View,
+    on_lists: bool,
+    lists_state: ListState,
+    tasks_state: ListState,
+    lists: Vec<TodoList>,
+    rows: Vec<Row>,
 }
 
 #[derive(Default)]
@@ -222,6 +232,29 @@ impl Ui {
         Ok(())
     }
 
+    fn toggle_trash(&mut self) {
+        if let Some(previous) = self.trash_return.take() {
+            self.view = previous.view;
+            self.on_lists = previous.on_lists;
+            self.lists_state = previous.lists_state;
+            self.tasks_state = previous.tasks_state;
+            self.lists = previous.lists;
+            self.rows = previous.rows;
+        } else {
+            self.trash_return = Some(BrowserPosition {
+                view: self.view,
+                on_lists: self.on_lists,
+                lists_state: std::mem::take(&mut self.lists_state),
+                tasks_state: std::mem::take(&mut self.tasks_state),
+                lists: std::mem::take(&mut self.lists),
+                rows: std::mem::take(&mut self.rows),
+            });
+            self.view = View::Trash;
+            self.on_lists = true;
+        }
+        self.status.clear();
+    }
+
     fn handle(&mut self, conn: &mut Connection, key: KeyEvent) -> Result<bool> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Ok(false);
@@ -257,7 +290,9 @@ impl Ui {
                 }
                 self.activity = Some(activity);
             }
-            KeyCode::Tab | KeyCode::BackTab => {
+            KeyCode::Char('t') => self.toggle_trash(),
+            KeyCode::Esc if self.view == View::Trash => self.toggle_trash(),
+            KeyCode::Tab | KeyCode::BackTab if self.view != View::Trash => {
                 self.view = self.view.cycle(
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
                 );
@@ -798,13 +833,21 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
             Constraint::Length(5),
         ])
         .split(frame.size());
-    frame.render_widget(
-        Tabs::new(View::TITLES.map(Line::from).to_vec())
-            .block(Block::default().title("todo-tui").borders(Borders::ALL))
-            .select(ui.view.index())
-            .highlight_style(accent),
-        outer[0],
-    );
+    let header = Block::default().title("todo-tui").borders(Borders::ALL);
+    if ui.view == View::Trash {
+        frame.render_widget(
+            Paragraph::new(Line::styled("Trash", accent)).block(header),
+            outer[0],
+        );
+    } else {
+        frame.render_widget(
+            Tabs::new(View::TITLES.map(Line::from).to_vec())
+                .block(header)
+                .select(ui.view.index())
+                .highlight_style(accent),
+            outer[0],
+        );
+    }
     if let Some(form) = &ui.form {
         let lines = form
             .fields
@@ -957,9 +1000,14 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
     } else {
         "N add • E edit • p pin • u unpin • n Next • m move • Space done/reopen • o note • D trash"
     };
+    let navigation = if ui.view == View::Trash {
+        "t/Esc back"
+    } else {
+        "Tab/Shift-Tab views • t trash"
+    };
     frame.render_widget(
         Paragraph::new(format!(
-            "Tab/Shift-Tab views • hjkl/↑↓ navigate • v details • s activity • S sync • q quit\n{actions}\n{}\n{}",
+            "{navigation} • hjkl/↑↓ navigate • v details • s activity • S sync • q quit\n{actions}\n{}\n{}",
             safe(&ui.status),
             safe(if ui.sync_notice.is_empty() { &ui.sync_status } else { &ui.sync_notice })
         ))
@@ -1215,8 +1263,16 @@ mod tests {
         press(&mut ui, &mut conn, KeyCode::Char('D'));
         assert!(ui.rows.is_empty());
         press(&mut ui, &mut conn, KeyCode::Tab);
+        assert_eq!(ui.view, View::Today);
+        press(&mut ui, &mut conn, KeyCode::Tab);
+        assert_eq!(ui.view, View::Pinned);
+        press(&mut ui, &mut conn, KeyCode::Char('t'));
+        assert_eq!(ui.view, View::Trash);
         press(&mut ui, &mut conn, KeyCode::Tab);
         assert_eq!(ui.view, View::Trash);
+        press(&mut ui, &mut conn, KeyCode::Esc);
+        assert_eq!(ui.view, View::Pinned);
+        press(&mut ui, &mut conn, KeyCode::Char('t'));
         assert_eq!(ui.row().unwrap().task.uid, task.uid);
         press(&mut ui, &mut conn, KeyCode::Char('R'));
         assert!(ui.rows.is_empty());
@@ -1330,8 +1386,6 @@ mod tests {
         press(&mut ui, &mut conn, KeyCode::Enter);
         assert_eq!(db::show(&conn, &task.uid).unwrap().list_uid, list.uid);
         press(&mut ui, &mut conn, KeyCode::Char('n'));
-        press(&mut ui, &mut conn, KeyCode::BackTab);
-        assert_eq!(ui.view, View::Trash);
         press(&mut ui, &mut conn, KeyCode::BackTab);
         assert_eq!(ui.view, View::Today);
         assert_eq!(ui.row().unwrap().task.uid, task.uid);

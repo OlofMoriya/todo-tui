@@ -6,11 +6,11 @@ Install with `brew install olofmoriya/tap/todo-tui`, or build from source with `
 
 ## Terminal UI
 
-Cycle **Pinned**, **Lists**, **Today**, and **Trash** with Tab or Shift-Tab. Use arrow keys or `hjkl` to navigate. Press `v` to show or hide the selected task's details in a full-width pane at the bottom. The pane starts hidden. In a form, move between fields with Up/Down, select a list with Left/Right, and save with Enter on the last field. Ctrl-U clears a text field; Esc cancels.
+Cycle **Pinned**, **Lists**, and **Today** with Tab or Shift-Tab. Press `t` to open **Trash**, and `t` or Esc to return. Use arrow keys or `hjkl` to navigate. Press `v` to show or hide the selected task's details in a full-width pane at the bottom. The pane starts hidden. In a form, move between fields with Up/Down, select a list with Left/Right, and save with Enter on the last field. Ctrl-U clears a text field; Esc cancels.
 
 - `N` adds a task (Inbox is the default); `L` creates a list. In the Lists pane, `R` renames and `D` moves a list to Trash.
 - In a task pane, `E` edits, `p` pins or changes the avatar, `u` unpins, `n` toggles Next, and `m` moves the task.
-- Space completes or reopens a task immediately. Use `o` to add or edit a completion note later. `D` moves a task to Trash. In the Trash tab, use `R` to restore or `P` to permanently delete after typing `yes`.
+- Space completes or reopens a task immediately. Use `o` to add or edit a completion note later. `D` moves a task to Trash. In Trash, use `R` to restore or `P` to permanently delete after typing `yes`.
 - Adds, pins, and other writes from another local process appear automatically. Press `s` to review sync activity and before/after changes, or `S` to sync now. The footer flags new sync activity and sync problems.
 
 ## CLI examples
