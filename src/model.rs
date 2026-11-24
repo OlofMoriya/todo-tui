@@ -7,8 +7,6 @@ pub struct Todo {
     pub id: Option<usize>,
     #[serde(rename = "id")]
     pub uid: String,
-    #[serde(skip)]
-    pub list_id: usize,
     #[serde(rename = "list_id")]
     pub list_uid: String,
     pub list_title: String,

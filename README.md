@@ -2,6 +2,14 @@
 
 A terminal todo manager backed by local SQLite. Run `todo-tui` for the interactive UI or `todo-tui --help` for noninteractive commands. No server or agent is required.
 
+## Terminal UI
+
+Cycle **Pinned**, **Lists**, and **Today** with Tab or Shift-Tab. Use arrow keys or `hjkl` to navigate. The selected task's details are always visible. In a form, move between fields with Up/Down, select a list with Left/Right, and save with Enter on the last field. Ctrl-U clears a text field; Esc cancels.
+
+- `N` adds a task (Inbox is the default); `L` creates a list. In the Lists pane, `R` renames and `D` deletes an empty list.
+- In a task pane, `E` edits, `p` pins or changes the avatar, `u` unpins, `n` toggles Next, and `m` moves the task.
+- Space completes or reopens a task; `o` edits the completion note. `D` asks for confirmation before deleting.
+
 ## CLI examples
 
 ```sh

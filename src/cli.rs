@@ -228,7 +228,7 @@ impl Cli {
             return if self.json {
                 Err("--json requires a command".into())
             } else {
-                crate::run_tui()
+                crate::tui::run()
             };
         };
         let mut conn = db::open_db()?;

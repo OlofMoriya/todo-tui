@@ -24,7 +24,7 @@ pub fn open_db() -> Result<Connection> {
     Ok(db)
 }
 
-fn migrate(db: &mut Connection) -> Result<()> {
+pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
     fn version(db: &Connection) -> rusqlite::Result<u32> {
         db.query_row("PRAGMA user_version", [], |row| row.get(0))
     }
@@ -202,7 +202,7 @@ fn date(raw: Option<String>) -> Option<NaiveDate> {
 pub fn tasks(db: &Connection, q: Query<'_>) -> Result<Vec<Todo>> {
     let list_id = q.list.map(|id| resolve_id(db, "lists", id)).transpose()?;
     let mut stmt = db.prepare(
-        "SELECT t.id, t.uid, t.list_id, l.uid, l.title, t.title, t.description, t.due_date,
+        "SELECT t.id, t.uid, l.uid, l.title, t.title, t.description, t.due_date,
                 t.completed, t.completed_date, t.is_next, t.completion_note, p.agent, p.avatar
          FROM todos t LEFT JOIN lists l ON l.id = t.list_id
          LEFT JOIN pins p ON p.todo_id = t.id
@@ -232,25 +232,24 @@ pub fn tasks(db: &Connection, q: Query<'_>) -> Result<Vec<Todo>> {
             result.push(Todo {
                 id: Some(id),
                 uid: row.get(1)?,
-                list_id: row.get::<_, Option<_>>(2)?.unwrap_or_default(),
-                list_uid: row.get::<_, Option<_>>(3)?.unwrap_or_default(),
+                list_uid: row.get::<_, Option<_>>(2)?.unwrap_or_default(),
                 list_title: row
-                    .get::<_, Option<_>>(4)?
+                    .get::<_, Option<_>>(3)?
                     .unwrap_or_else(|| "(missing list)".into()),
-                title: row.get(5)?,
-                description: row.get(6)?,
-                due_date: date(row.get(7)?),
-                completed: row.get(8)?,
-                completed_date: date(row.get(9)?),
-                next: row.get(10)?,
-                completion_note: row.get(11)?,
+                title: row.get(4)?,
+                description: row.get(5)?,
+                due_date: date(row.get(6)?),
+                completed: row.get(7)?,
+                completed_date: date(row.get(8)?),
+                next: row.get(9)?,
+                completion_note: row.get(10)?,
                 pins: vec![],
             });
         }
-        if let Some(agent) = row.get(12)? {
+        if let Some(agent) = row.get(11)? {
             result.last_mut().unwrap().pins.push(Pin {
                 agent,
-                avatar: row.get(13)?,
+                avatar: row.get(12)?,
             });
         }
     }
@@ -408,58 +407,4 @@ pub fn change_task(db: &mut Connection, id: &str, change: Change<'_>) -> Result<
     let task = task_by_row(&tx, id)?;
     tx.commit()?;
     Ok(task)
-}
-
-// Compatibility adapter for the original list browser.
-pub fn fetch_todos(list_id: usize) -> Result<Vec<Todo>> {
-    tasks(
-        &open_db()?,
-        Query {
-            list: Some(&list_id.to_string()),
-            ..Query::default()
-        },
-    )
-}
-pub fn fetch_lists() -> Result<Vec<TodoList>> {
-    lists(&open_db()?)
-}
-pub fn add_list(list: &TodoList) -> Result<TodoList> {
-    create_list(&mut open_db()?, &list.title)
-}
-pub fn delete_list(id: usize) -> Result<TodoList> {
-    remove_list(&mut open_db()?, &id.to_string())
-}
-pub fn add_todo(todo: &Todo) -> Result<Todo> {
-    create_task(
-        &mut open_db()?,
-        Some(&todo.list_id.to_string()),
-        &todo.title,
-        todo.description.as_deref(),
-        todo.due_date,
-    )
-}
-pub fn update_todo(todo: &Todo) -> Result<Todo> {
-    change_task(
-        &mut open_db()?,
-        &todo.uid,
-        Change::Edit {
-            title: Some(&todo.title),
-            description: Some(todo.description.as_deref()),
-            due: Some(todo.due_date),
-        },
-    )
-}
-pub fn delete_todo(id: usize) -> Result<Todo> {
-    change_task(&mut open_db()?, &id.to_string(), Change::Delete)
-}
-pub fn toggle_todo_completion(id: usize, completed: bool) -> Result<Todo> {
-    change_task(
-        &mut open_db()?,
-        &id.to_string(),
-        if completed {
-            Change::Complete(None)
-        } else {
-            Change::Reopen
-        },
-    )
 }
