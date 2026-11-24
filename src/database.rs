@@ -7,21 +7,69 @@ use crate::model::{Pin, Todo, TodoList};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub fn open_db() -> Result<Connection> {
-    let path = match env::var_os("TODO_TUI_DB") {
+pub fn path() -> Result<PathBuf> {
+    Ok(match env::var_os("TODO_TUI_DB") {
         Some(path) => PathBuf::from(path),
         None => {
             PathBuf::from(env::var_os("HOME").ok_or("HOME is not set")?).join(".todo/todos.sqlite")
         }
-    };
+    })
+}
+
+pub fn open_db() -> Result<Connection> {
+    open(false)
+}
+
+pub fn open(backup: bool) -> Result<Connection> {
+    let path = path()?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    let mut db = Connection::open(path)?;
+    let mut db = Connection::open(&path)?;
     db.busy_timeout(Duration::from_secs(5))?;
+    if backup {
+        sync_backup(&db, &path)?;
+    }
     db.execute_batch("PRAGMA foreign_keys = ON")?;
     migrate(&mut db)?;
     Ok(db)
+}
+
+pub fn backup_path(path: &std::path::Path) -> PathBuf {
+    let mut file = path.as_os_str().to_owned();
+    file.push(".pre-ssh-sync.sqlite");
+    file.into()
+}
+
+fn sync_backup(db: &Connection, path: &std::path::Path) -> Result<()> {
+    let destination = backup_path(path);
+    if destination.is_file() {
+        return Ok(());
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let temp =
+        tempfile::NamedTempFile::new_in(parent.unwrap_or_else(|| std::path::Path::new(".")))?;
+    let mut copy = Connection::open(temp.path())?;
+    {
+        use rusqlite::backup::{Backup, StepResult};
+        let backup = Backup::new(db, &mut copy)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(backup.step(100)?, StepResult::Done) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("timed out creating sync backup".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    drop(copy);
+    match temp.persist_noclobber(destination) {
+        Ok(_) => Ok(()),
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub(crate) fn migrate(db: &mut Connection) -> Result<()> {

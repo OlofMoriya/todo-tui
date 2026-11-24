@@ -1,4 +1,9 @@
-use std::{io, time::Duration};
+use std::{
+    io,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use chrono::NaiveDate;
 use crossterm::{
@@ -63,6 +68,7 @@ struct Ui {
     tasks_state: ListState,
     form: Option<Form>,
     status: String,
+    sync_status: String,
 }
 
 impl Ui {
@@ -73,7 +79,8 @@ impl Ui {
         self.rows.get(self.tasks_state.selected()?)
     }
     fn refresh(&mut self, conn: &Connection) -> Result<()> {
-        let lists = db::lists(conn)?;
+        let read = conn.unchecked_transaction()?;
+        let lists = db::lists(&read)?;
         let list_index = keep(
             self.list().map(|l| l.uid.as_str()),
             lists.iter().map(|l| l.uid.as_str()),
@@ -82,7 +89,7 @@ impl Ui {
         let tasks = match self.view {
             View::Lists => match list_index {
                 Some(i) => db::tasks(
-                    conn,
+                    &read,
                     Query {
                         list: Some(&lists[i].uid),
                         ..Query::default()
@@ -91,20 +98,21 @@ impl Ui {
                 None => vec![],
             },
             View::Pinned => db::tasks(
-                conn,
+                &read,
                 Query {
                     pinned: true,
                     ..Query::default()
                 },
             )?,
             View::Today => db::tasks(
-                conn,
+                &read,
                 Query {
                     today: true,
                     ..Query::default()
                 },
             )?,
         };
+        read.commit()?;
         let rows = rows_for(self.view, tasks);
         let task_index = keep(
             self.row().map(Row::key),
@@ -681,8 +689,9 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
     };
     frame.render_widget(
         Paragraph::new(format!(
-            "Tab/Shift-Tab views • hjkl/↑↓ navigate • q quit\n{actions}\n{}",
-            safe(&ui.status)
+            "Tab/Shift-Tab views • hjkl/↑↓ navigate • S sync • q quit\n{actions}\n{}\n{}",
+            safe(&ui.status),
+            safe(&ui.sync_status)
         ))
         .wrap(Wrap { trim: false }),
         outer[2],
@@ -702,23 +711,101 @@ impl Drop for Tty {
     }
 }
 
+struct SyncWorker {
+    request: mpsc::Sender<crate::sync::Mode>,
+    responses: mpsc::Receiver<Option<String>>,
+    busy: bool,
+    next: Instant,
+}
+
+impl SyncWorker {
+    fn new() -> Self {
+        use crate::sync::{self, Mode};
+        let (request, jobs) = mpsc::channel();
+        let (results, responses) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(mode) = jobs.recv() {
+                let outcome = (|| -> Result<Option<String>> {
+                    if mode == Mode::Automatic && !sync::automatic_ready()? {
+                        return Ok(None);
+                    }
+                    Ok(Some(sync::run(mode)?.message()))
+                })()
+                .unwrap_or_else(|e| Some(format!("SSH sync: {e}")));
+                if results.send(outcome).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            request,
+            responses,
+            busy: false,
+            next: Instant::now(),
+        }
+    }
+
+    fn tick(&mut self, status: &mut String, manual: bool) {
+        if let Ok(message) = self.responses.try_recv() {
+            self.busy = false;
+            if let Some(message) = message {
+                *status = message;
+            }
+        }
+        if !self.busy && (manual || Instant::now() >= self.next) {
+            self.next = Instant::now() + Duration::from_secs(5);
+            let mode = if manual {
+                crate::sync::Mode::Normal
+            } else {
+                crate::sync::Mode::Automatic
+            };
+            self.busy = self.request.send(mode).is_ok();
+            if manual && self.busy {
+                *status = "Checking SSH sync…".into();
+            }
+        }
+    }
+}
+
+fn data_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("PRAGMA data_version", [], |row| row.get(0))
+}
+
 pub fn run() -> Result<()> {
     let mut conn = db::open_db()?;
     let mut ui = Ui {
         on_lists: true,
         ..Ui::default()
     };
+    let mut version = data_version(&conn)?;
     ui.refresh(&conn)?;
+    let mut refreshed = Instant::now();
     enable_raw_mode()?;
     let _tty = Tty;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+    let mut sync = SyncWorker::new();
     loop {
+        let mut input_changed = false;
+        sync.tick(&mut ui.sync_status, false);
+        // Poll even when there's no keyboard input: CLI and sync writes use
+        // separate SQLite connections and don't send terminal input events.
         terminal.draw(|frame| draw(frame, &mut ui))?;
-        if event::poll(Duration::from_millis(500))? {
+        if event::poll(Duration::from_millis(250))? {
             match event::read()? {
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press
+                        && key.code == KeyCode::Char('S')
+                        && ui.form.is_none()
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    sync.tick(&mut ui.sync_status, true);
+                }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    input_changed = true;
                     match ui.handle(&mut conn, key) {
                         Ok(false) => break,
                         Ok(true) => (),
@@ -733,8 +820,15 @@ pub fn run() -> Result<()> {
                 _ => (),
             }
         }
-        if let Err(e) = ui.refresh(&conn) {
-            ui.status = e.to_string();
+        let latest = data_version(&conn)?;
+        if input_changed || latest != version || refreshed.elapsed() >= Duration::from_secs(30) {
+            match ui.refresh(&conn) {
+                Ok(()) => {
+                    version = latest;
+                    refreshed = Instant::now();
+                }
+                Err(e) => ui.status = e.to_string(),
+            }
         }
     }
     Ok(())
@@ -750,6 +844,44 @@ mod tests {
             .handle(conn, KeyEvent::new(code, KeyModifiers::NONE))
             .unwrap());
         ui.refresh(conn).unwrap();
+    }
+
+    #[test]
+    fn another_sqlite_connection_invalidates_the_visible_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("todos.sqlite");
+        let mut writer = Connection::open(&path).unwrap();
+        db::migrate(&mut writer).unwrap();
+        let reader = Connection::open(&path).unwrap();
+        let mut ui = Ui::default();
+        ui.refresh(&reader).unwrap();
+        assert!(ui.rows.is_empty());
+        let initial = data_version(&reader).unwrap();
+        let task = db::create_task(&mut writer, None, "New from CLI", None, None).unwrap();
+        let added = data_version(&reader).unwrap();
+        assert_ne!(added, initial);
+        ui.refresh(&reader).unwrap();
+        assert_eq!(ui.row().unwrap().task.uid, task.uid);
+        ui.view = View::Pinned;
+        ui.refresh(&reader).unwrap();
+        assert!(ui.rows.is_empty());
+        db::change_task(
+            &mut writer,
+            &task.uid,
+            Change::Pin {
+                agent: "Agent",
+                avatar: Some("Pikachu"),
+            },
+        )
+        .unwrap();
+        let pinned = data_version(&reader).unwrap();
+        assert_ne!(pinned, added);
+        ui.refresh(&reader).unwrap();
+        assert_eq!(ui.row().unwrap().pin.as_ref().unwrap().avatar, "Pikachu");
+        db::change_task(&mut writer, &task.uid, Change::Unpin("Agent")).unwrap();
+        assert_ne!(data_version(&reader).unwrap(), pinned);
+        ui.refresh(&reader).unwrap();
+        assert!(ui.rows.is_empty());
     }
 
     #[test]

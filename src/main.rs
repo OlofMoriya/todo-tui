@@ -3,6 +3,9 @@ use clap::Parser;
 mod cli;
 mod database;
 mod model;
+mod snapshot;
+mod sync;
+mod sync_transport;
 mod tui;
 
 fn main() -> std::process::ExitCode {

@@ -138,6 +138,17 @@ pub enum Command {
     },
     /// Show the dedicated Inbox list
     Inbox,
+    /// Synchronize with an optional SSH master
+    #[command(args_conflicts_with_subcommands = true)]
+    Sync {
+        /// Apply the reviewed first-import preview
+        #[arg(long, conflicts_with = "stdio")]
+        accept_import: bool,
+        #[arg(long, hide = true)]
+        stdio: bool,
+        #[command(subcommand)]
+        action: Option<crate::sync::SyncAction>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -231,8 +242,16 @@ impl Cli {
                 crate::tui::run()
             };
         };
-        let mut conn = db::open_db()?;
         let json = self.json;
+        if let Command::Sync {
+            action,
+            accept_import,
+            stdio,
+        } = command
+        {
+            return crate::sync::cli(action, accept_import, stdio, json);
+        }
+        let mut conn = db::open_db()?;
         match command {
             Command::List {
                 date,
