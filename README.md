@@ -70,6 +70,19 @@ If both sides change the same task or list, sync pauses without replacing either
 
 This version uses full snapshots, intended for personal-sized databases (32 MiB limit per SSH request/reply). Do not copy an actively syncing SQLite file to repoint a client; the client is bound to the original master database identity.
 
+## Pi agent integration
+
+The [Pi extension](integrations/pi/todo-focus.ts) shows the current Pi session’s pinned work in Pi’s footer. It instructs Pi to call `todo_tui_focus` before substantial work: pin an existing task by ID, or create and pin a short Inbox task. Quick questions and small edits should not create tasks. Pi can release a pin without completing it, or mark finished work complete. The footer refreshes as pins change; `/todo-focus` lists this agent’s pins and IDs.
+
+Install from a local checkout, then use `/reload` in Pi:
+
+```sh
+mkdir -p ~/.pi/agent/extensions
+ln -s "$PWD/integrations/pi/todo-focus.ts" ~/.pi/agent/extensions/todo-focus.ts
+```
+
+It uses `todo-tui` on `PATH` and the same local database as the CLI, including `TODO_TUI_DB` if set. `PI_TODO_BIN` can specify another binary. Each Pi session gets its own pin identity (stable when resumed); set `PI_TODO_AGENT` to use a named identity instead, and `PI_TODO_AVATAR` to change the default avatar. Task titles can sync to your configured master, so keep them free of sensitive details.
+
 ## Data and testing
 
 The default database is `~/.todo/todos.sqlite`. Before upgrading, close the old app and back up the database (for example with SQLite's `.backup` command). The first use migrates its schema in a transaction; don't run older versions of the app against the migrated database. Use `TODO_TUI_DB=/path/to/copy.sqlite` to try the new version against a copy. `cargo test --locked` runs binary-level CLI and migration tests using disposable databases.
