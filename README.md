@@ -72,7 +72,7 @@ This version uses full snapshots, intended for personal-sized databases (32 MiB 
 
 ## Pi agent integration
 
-The [Pi extension](integrations/pi/todo-focus.ts) shows the current Pi session’s pinned work in Pi’s footer. It instructs Pi to call `todo_tui_focus` before substantial work: pin an existing task by ID, or create and pin a short Inbox task. Quick questions and small edits should not create tasks. Pi can release a pin without completing it, or mark finished work complete. The footer refreshes as pins change; `/todo-focus` lists this agent’s pins and IDs.
+The [Pi extension](integrations/pi/todo-focus.ts) shows the current Pi session’s pinned work in Pi’s footer. It instructs Pi to call `todo_tui_focus` before substantial work: pin an existing task by ID without moving it, or create and pin a task in the project’s list. The extension reuses or creates a list named after the Git repository’s root folder (or the working folder outside Git). Sessions started in your home folder or the filesystem root use Inbox if they aren’t inside a Git project. Quick questions and small edits should not create tasks. Pi can release a pin without completing it, or mark finished work complete. The footer refreshes as pins change; `/todo-focus` lists this agent’s pins and IDs.
 
 Install from a local checkout, then use `/reload` in Pi:
 

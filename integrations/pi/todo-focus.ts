@@ -1,4 +1,5 @@
-import { basename } from "node:path";
+import { homedir } from "node:os";
+import { basename, parse, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -10,8 +11,11 @@ type Task = {
   id: string;
   title: string;
   list_title: string;
+  list_id: string;
   pins: { agent: string; avatar: string }[];
 };
+
+type TodoList = { id: string; title: string };
 
 function clean(text: string, limit = 120): string {
   return Array.from(text.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/g, " ").trim()).slice(0, limit).join("");
@@ -36,6 +40,20 @@ export default function (pi: ExtensionAPI) {
       throw new Error(clean(result.stderr, 240) || `todo-tui ${args[0]} failed (exit ${result.code})`);
     }
     return JSON.parse(result.stdout) as T;
+  }
+
+  async function projectList(cwd: string, signal?: AbortSignal): Promise<TodoList | undefined> {
+    const root = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd, signal, timeout: 1500, maxBuffer: 16384 });
+    signal?.throwIfAborted();
+    const directory = resolve(root.code === 0 && !root.killed && !root.truncated && root.stdout.trim() ? root.stdout.trim() : cwd);
+    if (directory === resolve(homedir()) || directory === parse(directory).root) return undefined;
+    const name = clean(basename(directory));
+    if (!name) return undefined;
+    const title = name.toLowerCase() === "inbox" ? `${name} (project)` : name;
+    const lists = await cli<TodoList[]>(["lists"], signal);
+    return lists.find((list) => list.title === title)
+      ?? lists.find((list) => list.title.toLowerCase() === title.toLowerCase())
+      ?? await cli<TodoList>(["lists", "create", "--", title], signal);
   }
 
   const pins = (ctx: ExtensionContext, signal?: AbortSignal) =>
@@ -102,7 +120,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "todo_tui_focus",
     label: "Todo focus",
-    description: "Track substantial work in the user's todo-tui. Start pins an existing ID or creates and pins a concise work item. Status lists this agent's pins. Pause unpins without completing; finish completes a pinned task.",
+    description: "Track substantial work in the user's todo-tui. Start pins an existing ID or creates and pins a concise work item in the project list. Status lists this agent's pins. Pause unpins without completing; finish completes a pinned task.",
     promptSnippet: "Create or pin a todo-tui work item before substantial work, and update its status afterwards",
     promptGuidelines: [
       "Before starting substantial implementation, multi-step investigation, or operational work, call todo_tui_focus with action=start in its own tool call before doing that work. Use an existing task ID when the user identified one; otherwise use a short task title. Check status if continuing earlier work, and reuse the relevant pin. Do not create tasks for quick questions, small edits, or chat.",
@@ -132,11 +150,10 @@ export default function (pi: ExtensionAPI) {
           const title = clean(params.title ?? "");
           if (!id && !title) throw new Error("Provide an existing task ID or a short new title");
           if (!id) {
-            const project = clean(basename(ctx.cwd), 32);
-            const taskTitle = project ? `${project}: ${title}` : title;
-            id = active.find((task) => task.title === taskTitle)?.id;
+            const list = await projectList(ctx.cwd, signal);
+            id = active.find((task) => task.title === title && (!list || task.list_id === list.id))?.id;
             if (!id) {
-              const task = await cli<Task>(["add", "--", taskTitle], signal);
+              const task = await cli<Task>(["add", ...(list ? ["--list", list.id] : []), "--", title], signal);
               id = task.id;
               if (!TASK_ID.test(id)) throw new Error("Unexpected task ID from todo-tui");
             }
