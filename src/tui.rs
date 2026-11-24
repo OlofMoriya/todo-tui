@@ -1092,6 +1092,42 @@ fn data_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("PRAGMA data_version", [], |row| row.get(0))
 }
 
+const LIVE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+
+struct LiveRefresh {
+    version: Option<i64>,
+    last_check: Instant,
+}
+
+impl LiveRefresh {
+    fn new() -> Self {
+        Self {
+            version: None,
+            last_check: Instant::now(),
+        }
+    }
+
+    fn check(&mut self, ui: &mut Ui, conn: &Connection, input_changed: bool) -> Result<()> {
+        let now = Instant::now();
+        let latest = data_version(conn)?;
+        let external_write = self.version != Some(latest);
+        // A bounded re-query is also useful without version changes (e.g.
+        // Today depends on the date, and data_version ignores local writes).
+        if input_changed
+            || external_write
+            || now.duration_since(self.last_check) >= LIVE_REFRESH_INTERVAL
+        {
+            ui.refresh(conn)?;
+            if input_changed || external_write {
+                ui.refresh_activity(conn)?;
+            }
+            self.version = Some(latest);
+            self.last_check = now;
+        }
+        Ok(())
+    }
+}
+
 pub fn run() -> Result<()> {
     let mut conn = db::open_db()?;
     sync_log::init(&conn)?;
@@ -1099,10 +1135,8 @@ pub fn run() -> Result<()> {
         on_lists: true,
         ..Ui::default()
     };
-    let mut version = data_version(&conn)?;
-    ui.refresh(&conn)?;
-    ui.refresh_activity(&conn)?;
-    let mut refreshed = Instant::now();
+    let mut refresh = LiveRefresh::new();
+    refresh.check(&mut ui, &conn, false)?;
     enable_raw_mode()?;
     let _tty = Tty;
     let mut stdout = io::stdout();
@@ -1143,15 +1177,10 @@ pub fn run() -> Result<()> {
                 _ => (),
             }
         }
-        let latest = data_version(&conn)?;
-        if input_changed || latest != version || refreshed.elapsed() >= Duration::from_secs(30) {
-            match ui.refresh(&conn).and_then(|()| ui.refresh_activity(&conn)) {
-                Ok(()) => {
-                    version = latest;
-                    refreshed = Instant::now();
-                }
-                Err(e) => ui.status = e.to_string(),
-            }
+        if let Err(e) = refresh.check(&mut ui, &conn, input_changed) {
+            ui.status = format!("Refresh failed: {e}");
+        } else if ui.status.starts_with("Refresh failed: ") {
+            ui.status.clear();
         }
     }
     Ok(())
@@ -1205,6 +1234,50 @@ mod tests {
         assert_ne!(data_version(&reader).unwrap(), pinned);
         ui.refresh(&reader).unwrap();
         assert!(ui.rows.is_empty());
+    }
+
+    #[test]
+    fn idle_lists_refresh_across_writers_and_preserve_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("todos.sqlite");
+        let mut reader = Connection::open(&path).unwrap();
+        db::migrate(&mut reader).unwrap();
+        sync_log::init(&reader).unwrap();
+        let mut writer = Connection::open(&path).unwrap();
+        let work = db::create_list(&mut writer, "Work").unwrap();
+        let old = db::create_task(&mut writer, Some(&work.uid), "Original", None, None).unwrap();
+        let mut ui = Ui::default();
+        let mut refresh = LiveRefresh::new();
+        refresh.check(&mut ui, &reader, false).unwrap();
+        ui.lists_state.select(Some(1));
+        refresh.check(&mut ui, &reader, true).unwrap();
+        db::create_list(&mut writer, "A list above Work").unwrap();
+        db::rename_list(&mut writer, &work.uid, "Work renamed").unwrap();
+        let added =
+            db::create_task(&mut writer, Some(&work.uid), "External task", None, None).unwrap();
+        refresh.check(&mut ui, &reader, false).unwrap();
+        assert_eq!(ui.list().unwrap().title, "Work renamed");
+        assert_eq!(ui.row().unwrap().task.uid, old.uid);
+        assert_eq!(ui.rows.len(), 2);
+
+        let inbox = db::inbox(&writer).unwrap();
+        let mut other = Ui::default();
+        other.refresh(&writer).unwrap();
+        db::change_task(&mut writer, &old.uid, Change::Move(&inbox.uid)).unwrap();
+        other.lists_state.select(Some(2));
+        other.refresh(&writer).unwrap();
+        press(&mut other, &mut writer, KeyCode::Char(' '));
+        refresh.check(&mut ui, &reader, false).unwrap();
+        assert_eq!(ui.rows.len(), 1);
+        assert_eq!(ui.row().unwrap().task.uid, added.uid);
+        assert!(ui.row().unwrap().task.completed);
+
+        // Same-connection writes do not change PRAGMA data_version.
+        db::change_task(&mut reader, &added.uid, Change::Reopen).unwrap();
+        assert_eq!(refresh.version, Some(data_version(&reader).unwrap()));
+        refresh.last_check -= LIVE_REFRESH_INTERVAL;
+        refresh.check(&mut ui, &reader, false).unwrap();
+        assert!(!ui.row().unwrap().task.completed);
     }
 
     #[test]

@@ -11,7 +11,7 @@ Cycle **Pinned**, **Lists**, and **Today** with Tab or Shift-Tab. Press `t` to o
 - `N` adds a task (Inbox is the default); `L` creates a list. In the Lists pane, `R` renames and `D` moves a list to Trash.
 - In a task pane, `E` edits, `p` pins or changes the avatar, `u` unpins, `n` toggles Next, and `m` moves the task.
 - Space completes or reopens a task immediately. Use `o` to add or edit a completion note later. `D` moves a task to Trash. In Trash, use `R` to restore or `P` to permanently delete after typing `yes`.
-- Adds, pins, and other writes from another local process appear automatically. Press `s` to review sync activity and before/after changes, or `S` to sync now. The footer flags new sync activity and sync problems.
+- The TUI refreshes the visible lists and tasks while idle, including additions, moves, and completions from another TUI, the CLI, or a sync pull. This local refresh is independent of the SSH sync interval. Press `s` to review sync activity and before/after changes, or `S` to sync now. The footer flags new sync activity and sync problems.
 
 ## CLI examples
 
