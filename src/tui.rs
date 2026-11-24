@@ -62,6 +62,7 @@ impl Row {
 struct Ui {
     view: View,
     on_lists: bool,
+    show_details: bool,
     lists: Vec<TodoList>,
     rows: Vec<Row>,
     lists_state: ListState,
@@ -144,6 +145,7 @@ impl Ui {
         let lists = self.view == View::Lists && self.on_lists;
         match key.code {
             KeyCode::Char('q') => return Ok(false),
+            KeyCode::Char('v') => self.show_details = !self.show_details,
             KeyCode::Tab | KeyCode::BackTab => {
                 self.view = self.view.cycle(
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
@@ -601,24 +603,25 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
         );
         return;
     }
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(if ui.view == View::Lists {
-            [
-                Constraint::Percentage(22),
-                Constraint::Percentage(34),
-                Constraint::Percentage(44),
-            ]
-        } else {
-            [
-                Constraint::Length(0),
-                Constraint::Percentage(52),
-                Constraint::Percentage(48),
-            ]
-        })
-        .split(outer[1]);
+    let (browser, details) = if ui.show_details {
+        let height = outer[1].height;
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length((height / 3).max(5).min(height / 2)),
+            ])
+            .split(outer[1]);
+        (split[0], Some(split[1]))
+    } else {
+        (outer[1], None)
+    };
     let on_lists = ui.view == View::Lists && ui.on_lists;
-    if ui.view == View::Lists {
+    let task_area = if ui.view == View::Lists {
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(22), Constraint::Min(0)])
+            .split(browser);
         let lists = ui
             .lists
             .iter()
@@ -632,7 +635,10 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
             panes[0],
             &mut ui.lists_state,
         );
-    }
+        panes[1]
+    } else {
+        browser
+    };
     let mut group = None;
     let items = ui
         .rows
@@ -669,19 +675,21 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
                     })
                     .borders(Borders::ALL),
             ),
-        panes[1],
+        task_area,
         &mut ui.tasks_state,
     );
-    frame.render_widget(
-        Paragraph::new(
-            ui.row()
-                .map(|r| detail(&r.task))
-                .unwrap_or_else(|| "No tasks".into()),
-        )
-        .block(Block::default().title("Details").borders(Borders::ALL))
-        .wrap(Wrap { trim: false }),
-        panes[2],
-    );
+    if let Some(area) = details {
+        frame.render_widget(
+            Paragraph::new(
+                ui.row()
+                    .map(|r| detail(&r.task))
+                    .unwrap_or_else(|| "No tasks".into()),
+            )
+            .block(Block::default().title("Details").borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
     let actions = if on_lists {
         "L new list • R rename • D delete • N new task"
     } else {
@@ -689,7 +697,7 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
     };
     frame.render_widget(
         Paragraph::new(format!(
-            "Tab/Shift-Tab views • hjkl/↑↓ navigate • S sync • q quit\n{actions}\n{}\n{}",
+            "Tab/Shift-Tab views • hjkl/↑↓ navigate • v details • S sync • q quit\n{actions}\n{}\n{}",
             safe(&ui.status),
             safe(&ui.sync_status)
         ))
@@ -885,6 +893,50 @@ mod tests {
     }
 
     #[test]
+    fn details_are_hidden_by_default_and_toggle_below_the_browser() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::migrate(&mut conn).unwrap();
+        db::create_task(&mut conn, None, "Focus", Some("Task description"), None).unwrap();
+        let mut ui = Ui {
+            on_lists: true,
+            ..Ui::default()
+        };
+        ui.refresh(&conn).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut render = |ui: &mut Ui| {
+            terminal.draw(|f| draw(f, ui)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .chunks(100)
+                .map(|line| {
+                    line.iter()
+                        .map(|cell| cell.symbol.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let hidden = render(&mut ui);
+        assert!(hidden[3].contains("Tasks"));
+        assert!(!hidden.iter().any(|line| line.contains("Details")));
+        press(&mut ui, &mut conn, KeyCode::Char('v'));
+        let shown = render(&mut ui);
+        let details = shown
+            .iter()
+            .position(|line| line.starts_with("┌Details"))
+            .unwrap();
+        assert!(details > 3);
+        assert!(shown[details].ends_with('┐'));
+        assert!(shown[details + 1..]
+            .iter()
+            .any(|line| line.contains("Task description")));
+        press(&mut ui, &mut conn, KeyCode::Char('v'));
+        let closed = render(&mut ui);
+        assert_eq!(closed, hidden);
+    }
+
+    #[test]
     fn tabs_pins_moves_and_completion_share_the_store() {
         let mut conn = Connection::open_in_memory().unwrap();
         db::migrate(&mut conn).unwrap();
@@ -931,7 +983,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol.as_str())
             .collect::<String>();
-        for text in ["By human or agent", "Pikachu", "Robot", "Description"] {
+        for text in ["By human or agent", "Pikachu", "Robot"] {
             assert!(rendered.contains(text), "missing {text}");
         }
         press(&mut ui, &mut conn, KeyCode::Char('m'));
