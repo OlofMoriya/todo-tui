@@ -10,7 +10,7 @@ Cycle **Pinned**, **Lists**, **Today**, and **Trash** with Tab or Shift-Tab. Use
 
 - `N` adds a task (Inbox is the default); `L` creates a list. In the Lists pane, `R` renames and `D` moves a list to Trash.
 - In a task pane, `E` edits, `p` pins or changes the avatar, `u` unpins, `n` toggles Next, and `m` moves the task.
-- Space completes or reopens a task; `o` edits the completion note. `D` moves a task to Trash. In the Trash tab, use `R` to restore or `P` to permanently delete after typing `yes`.
+- Space completes or reopens a task immediately. Use `o` to add or edit a completion note later. `D` moves a task to Trash. In the Trash tab, use `R` to restore or `P` to permanently delete after typing `yes`.
 - Adds, pins, and other writes from another local process appear automatically. Press `s` to review sync activity and before/after changes, or `S` to sync now. The footer flags new sync activity and sync problems.
 
 ## CLI examples

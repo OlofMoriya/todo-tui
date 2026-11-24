@@ -391,16 +391,14 @@ impl Ui {
                             task.completion_note.as_deref().unwrap_or_default(),
                         )],
                     )),
-                    ' ' if !task.completed => Some(Form::new(
-                        Action::Complete(id),
-                        vec![Field::text(
-                            "Completion note (optional)",
-                            task.completion_note.as_deref().unwrap_or_default(),
-                        )],
-                    )),
                     ' ' => {
-                        db::change_task(conn, &id, Change::Reopen)?;
-                        self.status = "Reopened".into();
+                        let (change, status) = if task.completed {
+                            (Change::Reopen, "Reopened")
+                        } else {
+                            (Change::Complete(None), "Completed")
+                        };
+                        db::change_task(conn, &id, change)?;
+                        self.status = status.into();
                         None
                     }
                     'n' => {
@@ -476,7 +474,6 @@ enum Action {
     Pin(String),
     Unpin(String),
     Note(String),
-    Complete(String),
     PurgeTask(String),
 }
 
@@ -632,7 +629,6 @@ impl Form {
             ),
             Action::Unpin(id) => (id, Change::Unpin(v(0)?), "Unpinned"),
             Action::Note(id) => (id, Change::Note(optional(0)?), "Note updated"),
-            Action::Complete(id) => (id, Change::Complete(optional(0)?), "Completed"),
             Action::PurgeTask(id) => {
                 confirmed()?;
                 (
@@ -1340,11 +1336,30 @@ mod tests {
         assert_eq!(ui.view, View::Today);
         assert_eq!(ui.row().unwrap().task.uid, task.uid);
         press(&mut ui, &mut conn, KeyCode::Char(' '));
-        ui.form.as_mut().unwrap().paste("Finished");
-        press(&mut ui, &mut conn, KeyCode::Enter);
+        assert!(ui.form.is_none());
         assert!(ui.rows.is_empty());
         let done = db::show(&conn, &task.uid).unwrap();
-        assert_eq!(done.completion_note.as_deref(), Some("Finished"));
+        assert!(done.completed);
+        assert_eq!(done.completion_note, None);
         assert_eq!(done.description.as_deref(), Some("Description"));
+        ui.view = View::Lists;
+        ui.lists_state.select(Some(1));
+        ui.refresh(&conn).unwrap();
+        press(&mut ui, &mut conn, KeyCode::Char('o'));
+        ui.form.as_mut().unwrap().paste("Finished");
+        press(&mut ui, &mut conn, KeyCode::Enter);
+        assert_eq!(
+            db::show(&conn, &task.uid)
+                .unwrap()
+                .completion_note
+                .as_deref(),
+            Some("Finished")
+        );
+        press(&mut ui, &mut conn, KeyCode::Char(' '));
+        assert!(!db::show(&conn, &task.uid).unwrap().completed);
+        press(&mut ui, &mut conn, KeyCode::Char(' '));
+        let completed_again = db::show(&conn, &task.uid).unwrap();
+        assert!(completed_again.completed);
+        assert_eq!(completed_again.completion_note.as_deref(), Some("Finished"));
     }
 }
