@@ -526,7 +526,7 @@ pub fn cli(action: Option<SyncAction>, accept: bool, stdio: bool, json: bool) ->
                                 _ => "update",
                             };
                             let title = match d.after.as_ref().or(d.before.as_ref()) {
-                                Some(Record::List { title } | Record::Task { title, .. }) => {
+                                Some(Record::List { title, .. } | Record::Task { title, .. }) => {
                                     title.as_str()
                                 }
                                 None => "",

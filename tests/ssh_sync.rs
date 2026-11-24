@@ -220,7 +220,7 @@ fn offline_work_conflicts_deletions_and_retries() {
     p.local(&["note", moved, "A separate note"]);
     p.local(&["edit", both, "--title", "Local version"]);
     p.master(&["edit", both, "--title", "Master version"]);
-    p.master(&["delete", delete, "--yes"]);
+    p.master(&["delete", delete]);
     let remote_add = p.master(&["add", "Master added this offline"]);
     assert_eq!(p.local(&["sync", "status"])["pending_changes"], 3);
     assert_eq!(p.local(&["sync"])["outcome"], "conflicts");
@@ -244,7 +244,8 @@ fn offline_work_conflicts_deletions_and_retries() {
     assert_eq!(synced_move["next"], true);
     assert_eq!(synced_move["pins"][0]["agent"], "Codex");
     assert_eq!(synced_move["completion_note"], "A separate note");
-    expect_error(p.command(false, &["show", delete], ""), "no todo");
+    assert!(p.local(&["show", delete])["trashed_at"].is_string());
+    assert_eq!(p.local(&["trash"])["tasks"][0]["id"], delete);
     assert_eq!(
         p.local(&["sync"]),
         serde_json::json!({"outcome":"synced","uploaded":0,"downloaded":0})
@@ -275,7 +276,8 @@ fn compare_and_swap_and_lost_ack_do_not_duplicate_or_resurrect() {
     assert_eq!(p.local(&["sync", "status"])["pending_attempt"], true);
     assert_eq!(p.master(&["show", task])["title"], "Outgoing task");
     assert_eq!(rows(&p.master(&["list"])), 2);
-    p.master(&["delete", task, "--yes"]);
+    p.master(&["delete", task]);
+    p.master(&["purge", task, "--yes"]);
     let another = p.local(&["add", "Kept editing after lost response"]);
     assert_eq!(p.local(&["sync"])["outcome"], "synced");
     assert_eq!(p.local(&["sync"])["outcome"], "synced");
@@ -290,12 +292,33 @@ fn compare_and_swap_and_lost_ack_do_not_duplicate_or_resurrect() {
 }
 
 #[test]
+fn list_trash_and_restore_sync_without_rewriting_children() {
+    let p = Pair::new();
+    let list = p.local(&["lists", "create", "Work"]);
+    let list = id(&list);
+    let task = p.local(&["add", "Retained task", "--list", list]);
+    let task = id(&task);
+    p.first_sync();
+    p.local(&["lists", "delete", list]);
+    assert_eq!(p.local(&["sync"])["uploaded"], 1);
+    let archived = p.master(&["trash"]);
+    assert_eq!(archived["lists"][0]["id"], list);
+    assert_eq!(archived["tasks"][0]["id"], task);
+    assert!(archived["tasks"][0]["trashed_at"].is_null());
+    p.master(&["lists", "restore", list]);
+    assert_eq!(p.local(&["sync"])["downloaded"], 1);
+    assert_eq!(p.local(&["list"])[0]["id"], task);
+    assert_eq!(rows(&p.local(&["trash"])["tasks"]), 0);
+}
+
+#[test]
 fn deletion_conflicts_with_new_task_in_the_list() {
     let p = Pair::new();
     let work = p.local(&["lists", "create", "Work"]);
     let work = id(&work);
     p.first_sync();
-    p.local(&["lists", "delete", work, "--yes"]);
+    p.local(&["lists", "delete", work]);
+    p.local(&["lists", "purge", work, "--yes"]);
     let task = p.master(&["add", "New task", "--list", work]);
     assert_eq!(p.local(&["sync"])["outcome"], "conflicts");
     let conflict_key = key("list", work);

@@ -4,6 +4,7 @@
 
 - **Rebuilt:** local task/list workflows, the JSON CLI, and the Pinned, Lists, and Today tabs. The CLI and TUI use the same SQLite queries and mutations. The migration is covered by tests against disposable copies of the legacy schema.
 - **Rebuilt:** optional local-first SSH sync with first-import preview, SQLite backups, offline edits, conflict resolution, and retry receipts. The TUI refreshes from local writes continuously and syncs in the background when configured. No normal CLI query makes a network call.
+- **Rebuilt:** reversible Trash for tasks and lists in the TUI, CLI, and SSH sync. Permanent purge is explicit and confirmed.
 - **Still open:** Owl actions.
 - **Owl prerequisite:** verify a tool-disabled request path before sending task text. The installed Owl CLI exposes agent roles, but selecting a role is not the same as disabling tools.
 

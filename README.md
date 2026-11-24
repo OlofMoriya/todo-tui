@@ -6,11 +6,11 @@ Install with `brew install olofmoriya/tap/todo-tui`, or build from source with `
 
 ## Terminal UI
 
-Cycle **Pinned**, **Lists**, and **Today** with Tab or Shift-Tab. Use arrow keys or `hjkl` to navigate. Press `v` to show or hide the selected task's details in a full-width pane at the bottom. The pane starts hidden. In a form, move between fields with Up/Down, select a list with Left/Right, and save with Enter on the last field. Ctrl-U clears a text field; Esc cancels.
+Cycle **Pinned**, **Lists**, **Today**, and **Trash** with Tab or Shift-Tab. Use arrow keys or `hjkl` to navigate. Press `v` to show or hide the selected task's details in a full-width pane at the bottom. The pane starts hidden. In a form, move between fields with Up/Down, select a list with Left/Right, and save with Enter on the last field. Ctrl-U clears a text field; Esc cancels.
 
-- `N` adds a task (Inbox is the default); `L` creates a list. In the Lists pane, `R` renames and `D` deletes an empty list.
+- `N` adds a task (Inbox is the default); `L` creates a list. In the Lists pane, `R` renames and `D` moves a list to Trash.
 - In a task pane, `E` edits, `p` pins or changes the avatar, `u` unpins, `n` toggles Next, and `m` moves the task.
-- Space completes or reopens a task; `o` edits the completion note. `D` asks for confirmation before deleting.
+- Space completes or reopens a task; `o` edits the completion note. `D` moves a task to Trash. In the Trash tab, use `R` to restore or `P` to permanently delete after typing `yes`.
 - Adds, pins, and other writes from another local process appear automatically. With SSH sync enabled and the first import approved, the TUI checks the master at startup and every five seconds in the background. Press `S` to check now.
 
 ## CLI examples
@@ -36,13 +36,27 @@ todo-tui note "$TASK" 'Confirmed on macOS'
 todo-tui show "$TASK" --json
 ```
 
-Plain `list` and `list --count` still show/count open tasks due through today (or through `--date`). Use `list --json` or `list --status all` for all tasks, `--list ID` for a specific list, and `--next` for open Next tasks. `today` orders overdue, due-today and Next work with pins first, then Next, then due date. Completing a task clears its pins; unpinning does not complete it. Lists must be empty before deletion, and Inbox cannot be renamed or deleted. Use `--yes` for CLI deletions.
+Plain `list` and `list --count` still show/count open tasks due through today (or through `--date`). Use `list --json` or `list --status all` for all tasks, `--list ID` for a specific list, and `--next` for open Next tasks. `today` orders overdue, due-today and Next work with pins first, then Next, then due date. Completing a task clears its pins; unpinning does not complete it. Inbox cannot be renamed, trashed, or purged.
 
 `--json` writes one value: an object for a detail or mutation, an array for a collection, or a number for `--count`. Task and list IDs in JSON are opaque stable strings. Legacy numeric IDs still work as local inputs; don't use them across databases. Errors go to stderr: exit `0` on success, `1` on a database/workflow error, and `2` for invalid CLI syntax.
 
+## Trash and recovery
+
+```sh
+todo-tui delete "$TASK"                 # archive is an alias
+todo-tui lists delete "$LIST"
+todo-tui trash --json                   # lists and tasks (including tasks hidden by their list)
+todo-tui lists restore "$LIST"          # restores its tasks unless individually trashed
+todo-tui restore "$TASK"                # restore its parent list first, if needed
+todo-tui purge "$TASK" --yes             # permanent, only from Trash
+todo-tui lists purge "$LIST" --yes       # permanent, including every task in a trashed list
+```
+
+Trash is hidden from regular lists, Today, and Pinned. `show` still works for a trashed task by ID. There is no automatic purge.
+
 ## Optional SSH sync
 
-1. Install the same `todo-tui` version on the Mac mini and MacBook. Enable macOS Remote Login on the mini. As the MacBook user, verify the mini's host key and set up key-based SSH so `ssh -o BatchMode=yes mini true` succeeds. Use your SSH config for an alias, custom port, or IPv6 address.
+1. Install the same `todo-tui` version on the Mac mini and MacBook. Upgrade both to 0.3.0 or newer before syncing Trash; older peers are rejected. Enable macOS Remote Login on the mini. As the MacBook user, verify the mini's host key and set up key-based SSH so `ssh -o BatchMode=yes mini true` succeeds. Use your SSH config for an alias, custom port, or IPv6 address.
 2. On the MacBook, configure the mini, preview the first import, and approve it:
 
    ```sh

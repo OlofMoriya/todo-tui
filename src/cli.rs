@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::{
-    database::{self as db, Change, Query, Result},
+    database::{self as db, Change, Query, Result, TrashAction, TrashFilter},
     model::{Todo, TodoList},
 };
 
@@ -105,12 +105,25 @@ pub enum Command {
         id: String,
         list: String,
     },
-    /// Delete a task permanently
+    /// Move a task to Trash (reversible)
+    #[command(visible_alias = "archive")]
     Delete {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Restore a task from Trash
+    Restore {
+        id: String,
+    },
+    /// Permanently delete a task already in Trash
+    Purge {
         id: String,
         #[arg(long, required = true)]
         yes: bool,
     },
+    /// Show trashed lists and tasks
+    Trash,
     /// Pin a task, or update the avatar on an existing pin
     Pin {
         id: String,
@@ -160,12 +173,29 @@ pub enum ListAction {
         id: String,
         title: String,
     },
-    /// Delete an empty list (Inbox cannot be deleted)
+    /// Move a list and its tasks to Trash (Inbox is protected)
+    #[command(visible_alias = "archive")]
     Delete {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Restore a list and any of its tasks not trashed individually
+    Restore {
+        id: String,
+    },
+    /// Permanently delete a trashed list and all its tasks
+    Purge {
         id: String,
         #[arg(long, required = true)]
         yes: bool,
     },
+}
+
+#[derive(Serialize)]
+struct Trash {
+    lists: Vec<TodoList>,
+    tasks: Vec<Todo>,
 }
 
 fn output<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T)) -> Result<()> {
@@ -211,6 +241,12 @@ fn task_line(t: &Todo) {
 
 fn task_detail(t: &Todo) {
     task_line(t);
+    if let Some(date) = &t.trashed_at {
+        println!("Trashed: {date}");
+    }
+    if let Some(date) = &t.list_trashed_at {
+        println!("Parent list trashed: {date}");
+    }
     if let Some(description) = &t.description {
         println!("Description: {description}");
     }
@@ -223,7 +259,12 @@ fn task_detail(t: &Todo) {
 }
 
 fn list_line(list: &TodoList) {
-    println!("{}\t{}", list.uid, list.title);
+    let status = if list.trashed_at.is_some() {
+        " [Trash]"
+    } else {
+        ""
+    };
+    println!("{}\t{}{status}", list.uid, list.title);
 }
 
 pub fn days_from_now(days: u64) -> Result<NaiveDate> {
@@ -347,9 +388,28 @@ impl Cli {
                 )
             }
             Command::Inbox => return output(json, &db::inbox(&conn)?, list_line),
+            Command::Trash => {
+                let read = conn.transaction()?;
+                let trash = Trash {
+                    lists: db::lists(&read, true)?,
+                    tasks: db::tasks(
+                        &read,
+                        Query {
+                            trash: TrashFilter::Trashed,
+                            ..Query::default()
+                        },
+                    )?,
+                };
+                return output(json, &trash, |trash| {
+                    println!("Trashed lists:");
+                    trash.lists.iter().for_each(list_line);
+                    println!("Trashed tasks:");
+                    trash.tasks.iter().for_each(task_line);
+                });
+            }
             Command::Lists { action } => {
                 return match action {
-                    None => output(json, &db::lists(&conn)?, |lists| {
+                    None => output(json, &db::lists(&conn, false)?, |lists| {
                         lists.iter().for_each(list_line)
                     }),
                     Some(ListAction::Create { title }) => {
@@ -358,8 +418,18 @@ impl Cli {
                     Some(ListAction::Rename { id, title }) => {
                         output(json, &db::rename_list(&mut conn, &id, &title)?, list_line)
                     }
-                    Some(ListAction::Delete { id, .. }) => {
-                        output(json, &db::remove_list(&mut conn, &id)?, list_line)
+                    Some(action) => {
+                        let (id, action) = match action {
+                            ListAction::Delete { id, .. } => (id, TrashAction::Delete),
+                            ListAction::Restore { id } => (id, TrashAction::Restore),
+                            ListAction::Purge { id, .. } => (id, TrashAction::Purge),
+                            _ => unreachable!(),
+                        };
+                        output(
+                            json,
+                            &db::change_list_trash(&mut conn, &id, action)?,
+                            list_line,
+                        )
                     }
                 };
             }
@@ -393,7 +463,9 @@ impl Cli {
                     Command::Note { id, text, .. } => (id, Change::Note(text.as_deref())),
                     Command::Next { id, clear } => (id, Change::Next(!clear)),
                     Command::Move { id, list } => (id, Change::Move(list)),
-                    Command::Delete { id, .. } => (id, Change::Delete),
+                    Command::Delete { id, .. } => (id, Change::Trash(TrashAction::Delete)),
+                    Command::Restore { id } => (id, Change::Trash(TrashAction::Restore)),
+                    Command::Purge { id, .. } => (id, Change::Trash(TrashAction::Purge)),
                     Command::Pin { id, agent, avatar } => (
                         id,
                         Change::Pin {

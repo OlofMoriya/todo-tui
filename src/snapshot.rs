@@ -13,6 +13,8 @@ pub type Snapshot = BTreeMap<String, Record>;
 pub enum Record {
     List {
         title: String,
+        #[serde(default)]
+        trashed_at: Option<String>,
     },
     Task {
         list: String,
@@ -24,6 +26,8 @@ pub enum Record {
         next: bool,
         completion_note: Option<String>,
         pins: BTreeMap<String, String>,
+        #[serde(default)]
+        trashed_at: Option<String>,
     },
 }
 
@@ -37,17 +41,20 @@ pub fn read(conn: &Connection) -> Result<Snapshot> {
         }
     };
     let mut data = Snapshot::new();
-    let mut lists = conn.prepare("SELECT uid, title FROM lists")?;
+    let mut lists = conn.prepare("SELECT uid, title, trashed_at FROM lists")?;
     let mut rows = lists.query([])?;
     while let Some(row) = rows.next()? {
         data.insert(
             list_key(row.get_ref(0)?.as_str()?),
-            Record::List { title: row.get(1)? },
+            Record::List {
+                title: row.get(1)?,
+                trashed_at: row.get(2)?,
+            },
         );
     }
     let mut todos = conn.prepare(
         "SELECT t.uid, l.uid, t.title, t.description, t.due_date, t.completed, t.completed_date,
-                t.is_next, t.completion_note, p.agent, p.avatar
+                t.is_next, t.completion_note, p.agent, p.avatar, t.trashed_at
          FROM todos t LEFT JOIN lists l ON t.list_id = l.id
          LEFT JOIN pins p ON p.todo_id = t.id ORDER BY t.id, p.agent",
     )?;
@@ -71,6 +78,7 @@ pub fn read(conn: &Connection) -> Result<Snapshot> {
                     next: row.get(7)?,
                     completion_note: row.get(8)?,
                     pins: BTreeMap::new(),
+                    trashed_at: row.get(11)?,
                 },
             );
         }
@@ -116,7 +124,8 @@ pub fn validate(data: &Snapshot) -> Result<()> {
             && s.bytes()
                 .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
     };
-    if !matches!(data.get(INBOX), Some(Record::List { title }) if title == "Inbox") {
+    if !matches!(data.get(INBOX), Some(Record::List { title, trashed_at: None }) if title == "Inbox")
+    {
         return Err("sync snapshot has no Inbox".into());
     }
     for (key, record) in data {
@@ -142,8 +151,10 @@ pub fn apply(tx: &Connection, before: &Snapshot, after: &Snapshot) -> Result<()>
     let inbox = db::inbox(tx)?.uid;
     let changes = delta(before, after);
     for d in &changes {
-        if let Some(Record::List { title }) = &d.after {
-            tx.execute("INSERT INTO lists (uid,title) VALUES (?1,?2) ON CONFLICT(uid) DO UPDATE SET title=excluded.title", params![&d.key[5..], title])?;
+        if let Some(Record::List { title, trashed_at }) = &d.after {
+            tx.execute("INSERT INTO lists (uid,title,trashed_at) VALUES (?1,?2,?3)
+                        ON CONFLICT(uid) DO UPDATE SET title=excluded.title,trashed_at=excluded.trashed_at",
+                       params![&d.key[5..], title, trashed_at])?;
         }
     }
     for d in &changes {
@@ -162,15 +173,16 @@ pub fn apply(tx: &Connection, before: &Snapshot, after: &Snapshot) -> Result<()>
                 next,
                 completion_note,
                 pins,
+                trashed_at,
             }) => {
                 let list = if list == INBOX { &inbox } else { &list[5..] };
                 tx.execute(
-                    "INSERT INTO todos (uid,list_id,title,description,due_date,completed,completed_date,is_next,completion_note)
-                     VALUES (?1,(SELECT id FROM lists WHERE uid=?2),?3,?4,?5,?6,?7,?8,?9)
+                    "INSERT INTO todos (uid,list_id,title,description,due_date,completed,completed_date,is_next,completion_note,trashed_at)
+                     VALUES (?1,(SELECT id FROM lists WHERE uid=?2),?3,?4,?5,?6,?7,?8,?9,?10)
                      ON CONFLICT(uid) DO UPDATE SET list_id=excluded.list_id,title=excluded.title,description=excluded.description,
                      due_date=excluded.due_date,completed=excluded.completed,completed_date=excluded.completed_date,
-                     is_next=excluded.is_next,completion_note=excluded.completion_note",
-                    params![uid,list,title,description,due_date,completed,completed_date,next,completion_note],
+                     is_next=excluded.is_next,completion_note=excluded.completion_note,trashed_at=excluded.trashed_at",
+                    params![uid,list,title,description,due_date,completed,completed_date,next,completion_note,trashed_at],
                 )?;
                 let id: i64 =
                     tx.query_row("SELECT id FROM todos WHERE uid=?", [uid], |r| r.get(0))?;

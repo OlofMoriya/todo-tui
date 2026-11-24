@@ -25,7 +25,7 @@ use ratatui::{
 use rusqlite::Connection;
 
 use crate::{
-    database::{self as db, Change, Query, Result},
+    database::{self as db, Change, Query, Result, TrashAction, TrashFilter},
     model::{Pin, Todo, TodoList},
 };
 
@@ -35,16 +35,21 @@ enum View {
     #[default]
     Lists,
     Today,
+    Trash,
 }
 
 impl View {
-    const ALL: [Self; 3] = [Self::Pinned, Self::Lists, Self::Today];
-    const TITLES: [&'static str; 3] = ["Pinned", "Lists", "Today"];
+    const ALL: [Self; 4] = [Self::Pinned, Self::Lists, Self::Today, Self::Trash];
+    const TITLES: [&'static str; 4] = ["Pinned", "Lists", "Today", "Trash"];
+    fn has_list_pane(self) -> bool {
+        matches!(self, Self::Lists | Self::Trash)
+    }
     fn index(self) -> usize {
         Self::ALL.iter().position(|v| *v == self).unwrap()
     }
     fn cycle(self, reverse: bool) -> Self {
-        Self::ALL[(self.index() + if reverse { 2 } else { 1 }) % 3]
+        let n = Self::ALL.len();
+        Self::ALL[(self.index() + if reverse { n - 1 } else { 1 }) % n]
     }
 }
 
@@ -81,7 +86,10 @@ impl Ui {
     }
     fn refresh(&mut self, conn: &Connection) -> Result<()> {
         let read = conn.unchecked_transaction()?;
-        let lists = db::lists(&read)?;
+        let lists = db::lists(&read, self.view == View::Trash)?;
+        if self.view == View::Trash && lists.is_empty() {
+            self.on_lists = false;
+        }
         let list_index = keep(
             self.list().map(|l| l.uid.as_str()),
             lists.iter().map(|l| l.uid.as_str()),
@@ -102,6 +110,13 @@ impl Ui {
                 &read,
                 Query {
                     pinned: true,
+                    ..Query::default()
+                },
+            )?,
+            View::Trash => db::tasks(
+                &read,
+                Query {
+                    trash: TrashFilter::Trashed,
                     ..Query::default()
                 },
             )?,
@@ -142,7 +157,7 @@ impl Ui {
             }
             return Ok(true);
         }
-        let lists = self.view == View::Lists && self.on_lists;
+        let lists = self.view.has_list_pane() && self.on_lists;
         match key.code {
             KeyCode::Char('q') => return Ok(false),
             KeyCode::Char('v') => self.show_details = !self.show_details,
@@ -153,8 +168,8 @@ impl Ui {
                 self.tasks_state.select(None);
                 self.status.clear();
             }
-            KeyCode::Left | KeyCode::Char('h') if self.view == View::Lists => self.on_lists = true,
-            KeyCode::Right | KeyCode::Char('l') if self.view == View::Lists => {
+            KeyCode::Left | KeyCode::Char('h') if self.view.has_list_pane() => self.on_lists = true,
+            KeyCode::Right | KeyCode::Char('l') if self.view.has_list_pane() => {
                 self.on_lists = false
             }
             KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') => {
@@ -172,6 +187,33 @@ impl Ui {
                 };
                 state.select((len != 0).then(|| new.min(len - 1)));
             }
+            KeyCode::Char('R' | 'P') if self.view == View::Trash => {
+                let restore = key.code == KeyCode::Char('R');
+                if lists {
+                    if let Some(list) = self.list() {
+                        if restore {
+                            db::change_list_trash(conn, &list.uid, TrashAction::Restore)?;
+                            self.status = "List restored".into();
+                        } else {
+                            self.form = Some(Form::confirm_purge(
+                                Action::PurgeList(list.uid.clone()),
+                                &format!("{} and all its tasks", list.title),
+                            ));
+                        }
+                    }
+                } else if let Some(row) = self.row() {
+                    if restore {
+                        db::change_task(conn, &row.task.uid, Change::Trash(TrashAction::Restore))?;
+                        self.status = "Task restored".into();
+                    } else {
+                        self.form = Some(Form::confirm_purge(
+                            Action::PurgeTask(row.task.uid.clone()),
+                            &row.task.title,
+                        ));
+                    }
+                }
+            }
+            _ if self.view == View::Trash => (),
             KeyCode::Char('N') => {
                 self.form = Some(Form::new(
                     Action::Add,
@@ -191,14 +233,15 @@ impl Ui {
             }
             KeyCode::Char('R' | 'D') if lists => {
                 if let Some(list) = self.list() {
-                    self.form = Some(if key.code == KeyCode::Char('R') {
-                        Form::new(
+                    if key.code == KeyCode::Char('R') {
+                        self.form = Some(Form::new(
                             Action::RenameList(list.uid.clone()),
                             vec![Field::text("List name", &list.title)],
-                        )
+                        ));
                     } else {
-                        Form::confirm(Action::DeleteList(list.uid.clone()), &list.title)
-                    });
+                        db::change_list_trash(conn, &list.uid, TrashAction::Delete)?;
+                        self.status = "List moved to Trash".into();
+                    }
                 }
             }
             KeyCode::Char(c) if !lists => {
@@ -269,7 +312,11 @@ impl Ui {
                         self.status = "Next tag updated".into();
                         None
                     }
-                    'D' => Some(Form::confirm(Action::Delete(id), &task.title)),
+                    'D' => {
+                        db::change_task(conn, &id, Change::Trash(TrashAction::Delete))?;
+                        self.status = "Task moved to Trash".into();
+                        None
+                    }
                     _ => None,
                 };
             }
@@ -327,14 +374,14 @@ enum Action {
     Add,
     CreateList,
     RenameList(String),
-    DeleteList(String),
+    PurgeList(String),
     Edit(String),
     Move(String),
     Pin(String),
     Unpin(String),
     Note(String),
     Complete(String),
-    Delete(String),
+    PurgeTask(String),
 }
 
 struct Field {
@@ -387,11 +434,11 @@ impl Form {
             at: 0,
         }
     }
-    fn confirm(action: Action, title: &str) -> Self {
+    fn confirm_purge(action: Action, title: &str) -> Self {
         Self::new(
             action,
             vec![Field::text(
-                &format!("Delete ‘{}’? Type yes", safe(title)),
+                &format!("Permanently delete ‘{}’? Type yes", safe(title)),
                 "",
             )],
         )
@@ -464,10 +511,10 @@ impl Form {
                 db::rename_list(conn, id, v(0)?)?;
                 return Ok("List renamed");
             }
-            Action::DeleteList(id) => {
+            Action::PurgeList(id) => {
                 confirmed()?;
-                db::remove_list(conn, id)?;
-                return Ok("List deleted");
+                db::change_list_trash(conn, id, TrashAction::Purge)?;
+                return Ok("List and its tasks permanently deleted");
             }
             Action::Edit(id) => (
                 id,
@@ -490,9 +537,13 @@ impl Form {
             Action::Unpin(id) => (id, Change::Unpin(v(0)?), "Unpinned"),
             Action::Note(id) => (id, Change::Note(optional(0)?), "Note updated"),
             Action::Complete(id) => (id, Change::Complete(optional(0)?), "Completed"),
-            Action::Delete(id) => {
+            Action::PurgeTask(id) => {
                 confirmed()?;
-                (id, Change::Delete, "Task deleted")
+                (
+                    id,
+                    Change::Trash(TrashAction::Purge),
+                    "Task permanently deleted",
+                )
             }
         };
         db::change_task(conn, id, change)?;
@@ -530,6 +581,12 @@ fn detail(t: &Todo) -> String {
         safe(&t.list_title),
         t.uid
     );
+    if let Some(at) = &t.trashed_at {
+        text.push_str(&format!("\nTrashed: {}", safe(at)));
+    }
+    if t.list_trashed_at.is_some() {
+        text.push_str("\nParent list is in Trash");
+    }
     for p in &t.pins {
         text.push_str(&format!(
             "\nWorking: {} {}",
@@ -616,8 +673,8 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
     } else {
         (outer[1], None)
     };
-    let on_lists = ui.view == View::Lists && ui.on_lists;
-    let task_area = if ui.view == View::Lists {
+    let on_lists = ui.view.has_list_pane() && ui.on_lists;
+    let task_area = if ui.view.has_list_pane() {
         let panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(22), Constraint::Min(0)])
@@ -631,7 +688,15 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
             List::new(lists)
                 .highlight_symbol("› ")
                 .highlight_style(if on_lists { accent } else { Style::default() })
-                .block(Block::default().title("Lists").borders(Borders::ALL)),
+                .block(
+                    Block::default()
+                        .title(if ui.view == View::Trash {
+                            "Trashed lists"
+                        } else {
+                            "Lists"
+                        })
+                        .borders(Borders::ALL),
+                ),
             panes[0],
             &mut ui.lists_state,
         );
@@ -656,6 +721,12 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
                     task_label(&row.task),
                     safe(&row.task.list_title)
                 )));
+            } else if ui.view == View::Trash {
+                lines.push(Line::from(format!(
+                    "{} · {}",
+                    task_label(&row.task),
+                    safe(&row.task.list_title)
+                )));
             } else {
                 lines.push(Line::from(task_label(&row.task)));
             }
@@ -672,6 +743,7 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
                         View::Lists => "Tasks",
                         View::Pinned => "By human or agent",
                         View::Today => "Priorities",
+                        View::Trash => "Trashed tasks",
                     })
                     .borders(Borders::ALL),
             ),
@@ -690,10 +762,12 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
             area,
         );
     }
-    let actions = if on_lists {
-        "L new list • R rename • D delete • N new task"
+    let actions = if ui.view == View::Trash {
+        "R restore • P permanently delete"
+    } else if on_lists {
+        "L new list • R rename • D trash • N new task"
     } else {
-        "N add • E edit • p pin • u unpin • n Next • m move • Space done/reopen • o note • D delete"
+        "N add • E edit • p pin • u unpin • n Next • m move • Space done/reopen • o note • D trash"
     };
     frame.render_widget(
         Paragraph::new(format!(
@@ -893,6 +967,32 @@ mod tests {
     }
 
     #[test]
+    fn trash_browses_restores_and_confirms_purge() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::migrate(&mut conn).unwrap();
+        let task = db::create_task(&mut conn, None, "Task", None, None).unwrap();
+        let mut ui = Ui::default();
+        ui.refresh(&conn).unwrap();
+        press(&mut ui, &mut conn, KeyCode::Char('D'));
+        assert!(ui.rows.is_empty());
+        press(&mut ui, &mut conn, KeyCode::Tab);
+        press(&mut ui, &mut conn, KeyCode::Tab);
+        assert_eq!(ui.view, View::Trash);
+        assert_eq!(ui.row().unwrap().task.uid, task.uid);
+        press(&mut ui, &mut conn, KeyCode::Char('R'));
+        assert!(ui.rows.is_empty());
+        db::change_task(&mut conn, &task.uid, Change::Trash(TrashAction::Delete)).unwrap();
+        ui.refresh(&conn).unwrap();
+        press(&mut ui, &mut conn, KeyCode::Char('P'));
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.handle(&mut conn, enter).is_err());
+        assert!(db::show(&conn, &task.uid).is_ok());
+        ui.form.as_mut().unwrap().paste("yes");
+        press(&mut ui, &mut conn, KeyCode::Enter);
+        assert!(db::show(&conn, &task.uid).is_err());
+    }
+
+    #[test]
     fn details_are_hidden_by_default_and_toggle_below_the_browser() {
         let mut conn = Connection::open_in_memory().unwrap();
         db::migrate(&mut conn).unwrap();
@@ -991,6 +1091,8 @@ mod tests {
         press(&mut ui, &mut conn, KeyCode::Enter);
         assert_eq!(db::show(&conn, &task.uid).unwrap().list_uid, list.uid);
         press(&mut ui, &mut conn, KeyCode::Char('n'));
+        press(&mut ui, &mut conn, KeyCode::BackTab);
+        assert_eq!(ui.view, View::Trash);
         press(&mut ui, &mut conn, KeyCode::BackTab);
         assert_eq!(ui.view, View::Today);
         assert_eq!(ui.row().unwrap().task.uid, task.uid);

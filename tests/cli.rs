@@ -122,9 +122,9 @@ fn local_workflow() {
     assert_eq!(id(&moved), due);
     assert_eq!(moved["due_date"], before["due_date"]);
     assert_eq!(moved["pins"], before["pins"]);
-    s.error(&["lists", "delete", list, "--yes"], 1, "not empty");
-    s.error(&["lists", "delete", id(&inbox), "--yes"], 1, "Inbox");
-    s.error(&["delete", focus], 2, "--yes");
+    s.error(&["lists", "purge", list, "--yes"], 1, "only lists in Trash");
+    s.error(&["lists", "delete", id(&inbox)], 1, "Inbox");
+    s.error(&["purge", focus], 2, "--yes");
     s.error(&["edit", due, "--title", "  ", "--json"], 1, "blank");
     let done = s.json(&["complete", due, "--note", "Done!"]);
     assert_eq!(done["description"], "Original");
@@ -158,10 +158,57 @@ fn local_workflow() {
         Value::Null
     );
     s.json(&["delete", due, "--yes"]);
-    s.json(&["delete", focus, "--yes"]);
-    s.json(&["lists", "delete", list, "--yes"]);
+    s.json(&["delete", focus]);
+    s.json(&["purge", due, "--yes"]);
+    s.json(&["lists", "delete", list]);
+    s.json(&["lists", "purge", list, "--yes"]);
     s.error(&["show", due, "--json"], 1, "no todo");
     assert_eq!(ids(&s.json(&["list"])), [next]);
+}
+
+#[test]
+fn trash_preserves_data_and_requires_explicit_purge() {
+    let s = Sandbox::new();
+    let list = s.json(&["lists", "create", "Project"]);
+    let list_id = id(&list);
+    let first = s.json(&["add", "Keep my pin", "--list", list_id, "--due", "0"]);
+    let first_id = id(&first);
+    s.json(&["next", first_id]);
+    s.json(&["pin", first_id, "--agent", "Ada", "--avatar", "🎯"]);
+    let before = s.json(&["show", first_id]);
+    let second = s.json(&["add", "Individually trashed", "--list", list_id]);
+    let second_id = id(&second);
+    s.json(&["complete", second_id, "--note", "Keep me"]);
+    assert!(s.json(&["archive", second_id])["trashed_at"].is_string());
+    assert!(s.json(&["lists", "delete", list_id])["trashed_at"].is_string());
+    for args in [&["list"][..], &["today"], &["pinned"]] {
+        assert_eq!(s.json(args), serde_json::json!([]));
+    }
+    let trash = s.json(&["trash"]);
+    assert_eq!(ids(&trash["lists"]), [list_id]);
+    assert_eq!(ids(&trash["tasks"]), [first_id, second_id]);
+    assert!(trash["tasks"][0]["trashed_at"].is_null());
+    assert!(trash["tasks"][0]["list_trashed_at"].is_string());
+    s.error(&["restore", first_id], 1, "restore the parent list");
+    s.error(&["add", "No", "--list", list_id], 1, "restore the list");
+    s.error(&["lists", "purge", list_id], 2, "--yes");
+    s.json(&["lists", "restore", list_id]);
+    assert_eq!(s.json(&["show", first_id]), before);
+    assert_eq!(ids(&s.json(&["trash"])["tasks"]), [second_id]);
+    assert_eq!(
+        s.json(&["restore", second_id])["completion_note"],
+        "Keep me"
+    );
+    s.error(&["purge", first_id, "--yes"], 1, "only tasks in Trash");
+    s.json(&["lists", "delete", list_id]);
+    s.json(&["lists", "purge", list_id, "--yes"]);
+    for id in [first_id, second_id] {
+        s.error(&["show", id], 1, "no todo");
+    }
+    assert_eq!(
+        s.json(&["trash"]),
+        serde_json::json!({"lists":[],"tasks":[]})
+    );
 }
 
 fn legacy(path: &Path) {

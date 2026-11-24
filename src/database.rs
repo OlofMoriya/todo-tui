@@ -77,18 +77,28 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
         db.query_row("PRAGMA user_version", [], |row| row.get(0))
     }
     match version(db)? {
-        1 => return Ok(()),
-        0 => (),
+        2 => return Ok(()),
+        0 | 1 => (),
         _ => return Err("database schema is newer than this version of todo-tui".into()),
     }
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     match version(&tx)? {
-        1 => return Ok(()),
-        0 => (),
+        2 => return Ok(()),
+        0 => tx.execute_batch(LEGACY_SCHEMA)?,
+        1 => (),
         _ => return Err("database schema is newer than this version of todo-tui".into()),
     }
     tx.execute_batch(
-        "CREATE TABLE IF NOT EXISTS lists (id INTEGER PRIMARY KEY, title TEXT NOT NULL);
+        "ALTER TABLE lists ADD COLUMN trashed_at TEXT;
+                      ALTER TABLE todos ADD COLUMN trashed_at TEXT;
+                      PRAGMA user_version = 2;",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+const LEGACY_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS lists (id INTEGER PRIMARY KEY, title TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS todos (
              id INTEGER PRIMARY KEY, list_id INTEGER, title TEXT NOT NULL, description TEXT,
              due_date TEXT, completed BOOLEAN NOT NULL, completed_date TEXT
@@ -108,11 +118,7 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
          );
          INSERT INTO lists(title, uid) SELECT 'Inbox', lower(hex(randomblob(16)))
              WHERE NOT EXISTS (SELECT 1 FROM lists WHERE title = 'Inbox');
-         PRAGMA user_version = 1;",
-    )?;
-    tx.commit()?;
-    Ok(())
-}
+         PRAGMA user_version = 1;";
 
 fn required(text: &str, name: &str) -> Result<()> {
     if text.trim().is_empty() {
@@ -145,7 +151,7 @@ fn resolve_id(db: &Connection, table: &str, id: &str) -> Result<usize> {
 
 pub fn inbox(db: &Connection) -> Result<TodoList> {
     Ok(db.query_row(
-        "SELECT id, uid, title FROM lists WHERE title = 'Inbox' ORDER BY id LIMIT 1",
+        "SELECT id, uid, title, trashed_at FROM lists WHERE title = 'Inbox' ORDER BY id LIMIT 1",
         [],
         read_list,
     )?)
@@ -156,15 +162,17 @@ fn read_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<TodoList> {
         id: row.get(0)?,
         uid: row.get(1)?,
         title: row.get(2)?,
+        trashed_at: row.get(3)?,
     })
 }
 
-pub fn lists(db: &Connection) -> Result<Vec<TodoList>> {
+pub fn lists(db: &Connection, trashed: bool) -> Result<Vec<TodoList>> {
     let mut stmt = db.prepare(
-        "SELECT id, uid, title FROM lists ORDER BY title != 'Inbox', title COLLATE NOCASE, id",
+        "SELECT id, uid, title, trashed_at FROM lists WHERE (trashed_at IS NOT NULL) = ?
+         ORDER BY title != 'Inbox', title COLLATE NOCASE, id",
     )?;
     let rows = stmt
-        .query_map([], read_list)?
+        .query_map([trashed], read_list)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
@@ -179,11 +187,7 @@ pub fn create_list(db: &mut Connection, title: &str) -> Result<TodoList> {
         "INSERT INTO lists(title, uid) VALUES (?, lower(hex(randomblob(16))) )",
         [title],
     )?;
-    let list = tx.query_row(
-        "SELECT id, uid, title FROM lists WHERE id = ?",
-        [tx.last_insert_rowid()],
-        read_list,
-    )?;
+    let list = list_by_row(&tx, tx.last_insert_rowid().try_into()?)?;
     tx.commit()?;
     Ok(list)
 }
@@ -195,39 +199,67 @@ pub fn rename_list(db: &mut Connection, id: &str, title: &str) -> Result<TodoLis
     if title == "Inbox" || inbox(&tx)?.id == Some(id) {
         return Err("Inbox is reserved".into());
     }
+    ensure_active_list(&tx, id)?;
     tx.execute(
         "UPDATE lists SET title = ? WHERE id = ?",
         params![title, id],
     )?;
-    let list = tx.query_row(
-        "SELECT id, uid, title FROM lists WHERE id = ?",
-        [id],
-        read_list,
-    )?;
+    let list = list_by_row(&tx, id)?;
     tx.commit()?;
     Ok(list)
 }
 
-pub fn remove_list(db: &mut Connection, id: &str) -> Result<TodoList> {
+fn list_by_row(db: &Connection, id: usize) -> Result<TodoList> {
+    Ok(db.query_row(
+        "SELECT id, uid, title, trashed_at FROM lists WHERE id = ?",
+        [id],
+        read_list,
+    )?)
+}
+
+fn ensure_active_list(db: &Connection, id: usize) -> Result<()> {
+    if list_by_row(db, id)?.trashed_at.is_some() {
+        return Err("restore the list from Trash first".into());
+    }
+    Ok(())
+}
+
+pub enum TrashAction {
+    Delete,
+    Restore,
+    Purge,
+}
+
+pub fn change_list_trash(db: &mut Connection, id: &str, action: TrashAction) -> Result<TodoList> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let id = resolve_id(&tx, "lists", id)?;
     if inbox(&tx)?.id == Some(id) {
-        return Err("Inbox cannot be deleted".into());
+        return Err("Inbox cannot be trashed or purged".into());
     }
-    let list = tx.query_row(
-        "SELECT id, uid, title FROM lists WHERE id = ?",
-        [id],
-        read_list,
-    )?;
-    let changed = tx.execute(
-        "DELETE FROM lists WHERE id = ? AND NOT EXISTS (SELECT 1 FROM todos WHERE list_id = ?)",
-        [id, id],
-    )?;
-    if changed == 0 {
-        return Err("list is not empty; move or delete its tasks first".into());
-    }
+    let before = list_by_row(&tx, id)?;
+    let result = match action {
+        TrashAction::Delete => {
+            tx.execute(
+                "UPDATE lists SET trashed_at = COALESCE(trashed_at, ?) WHERE id = ?",
+                params![chrono::Utc::now().to_rfc3339(), id],
+            )?;
+            list_by_row(&tx, id)?
+        }
+        TrashAction::Restore => {
+            tx.execute("UPDATE lists SET trashed_at = NULL WHERE id = ?", [id])?;
+            list_by_row(&tx, id)?
+        }
+        TrashAction::Purge => {
+            if before.trashed_at.is_none() {
+                return Err("only lists in Trash can be purged".into());
+            }
+            tx.execute("DELETE FROM todos WHERE list_id = ?", [id])?;
+            tx.execute("DELETE FROM lists WHERE id = ?", [id])?;
+            before
+        }
+    };
     tx.commit()?;
-    Ok(list)
+    Ok(result)
 }
 
 #[derive(Default)]
@@ -240,6 +272,15 @@ pub struct Query<'a> {
     pub pinned: bool,
     pub agent: Option<&'a str>,
     pub id: Option<usize>,
+    pub trash: TrashFilter,
+}
+
+#[derive(Default)]
+pub enum TrashFilter {
+    #[default]
+    Active,
+    Trashed,
+    All,
 }
 
 fn date(raw: Option<String>) -> Option<NaiveDate> {
@@ -251,7 +292,7 @@ pub fn tasks(db: &Connection, q: Query<'_>) -> Result<Vec<Todo>> {
     let list_id = q.list.map(|id| resolve_id(db, "lists", id)).transpose()?;
     let mut stmt = db.prepare(
         "SELECT t.id, t.uid, l.uid, l.title, t.title, t.description, t.due_date,
-                t.completed, t.completed_date, t.is_next, t.completion_note, p.agent, p.avatar
+                t.completed, t.completed_date, t.is_next, t.completion_note, p.agent, p.avatar, t.trashed_at, l.trashed_at
          FROM todos t LEFT JOIN lists l ON l.id = t.list_id
          LEFT JOIN pins p ON p.todo_id = t.id
          WHERE (?1 IS NULL OR t.id = ?1) AND (?2 IS NULL OR t.list_id = ?2)
@@ -259,6 +300,7 @@ pub fn tasks(db: &Connection, q: Query<'_>) -> Result<Vec<Todo>> {
            AND (NOT ?5 OR (t.is_next AND NOT t.completed))
            AND (NOT ?6 OR (NOT t.completed AND (t.is_next OR t.due_date <= ?7)))
            AND (NOT ?8 OR p.agent IS NOT NULL) AND (?9 IS NULL OR p.agent = ?9)
+           AND (?10 IS NULL OR (t.trashed_at IS NOT NULL OR l.trashed_at IS NOT NULL) = ?10)
          ORDER BY t.completed, EXISTS (SELECT 1 FROM pins WHERE todo_id = t.id) DESC,
                   t.is_next DESC, t.due_date IS NULL, t.due_date, t.id, p.agent",
     )?;
@@ -271,7 +313,12 @@ pub fn tasks(db: &Connection, q: Query<'_>) -> Result<Vec<Todo>> {
         q.today,
         Local::now().date_naive().to_string(),
         q.pinned,
-        q.agent
+        q.agent,
+        match q.trash {
+            TrashFilter::Active => Some(false),
+            TrashFilter::Trashed => Some(true),
+            TrashFilter::All => None,
+        },
     ])?;
     let mut result: Vec<Todo> = Vec::new();
     while let Some(row) = rows.next()? {
@@ -292,6 +339,8 @@ pub fn tasks(db: &Connection, q: Query<'_>) -> Result<Vec<Todo>> {
                 next: row.get(9)?,
                 completion_note: row.get(10)?,
                 pins: vec![],
+                trashed_at: row.get(13)?,
+                list_trashed_at: row.get(14)?,
             });
         }
         if let Some(agent) = row.get(11)? {
@@ -314,6 +363,7 @@ fn task_by_row(db: &Connection, id: usize) -> Result<Todo> {
         db,
         Query {
             id: Some(id),
+            trash: TrashFilter::All,
             ..Query::default()
         },
     )?
@@ -334,6 +384,7 @@ pub fn create_task(
         Some(id) => resolve_id(&tx, "lists", id)?,
         None => inbox(&tx)?.id.unwrap(),
     };
+    ensure_active_list(&tx, list_id)?;
     tx.execute(
         "INSERT INTO todos(uid, list_id, title, description, due_date, completed)
          VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, 0)",
@@ -360,12 +411,17 @@ pub enum Change<'a> {
         avatar: Option<&'a str>,
     },
     Unpin(&'a str),
-    Delete,
+    Trash(TrashAction),
 }
 
 pub fn change_task(db: &mut Connection, id: &str, change: Change<'_>) -> Result<Todo> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let id = resolve_id(&tx, "todos", id)?;
+    let before = task_by_row(&tx, id)?;
+    let in_trash = before.trashed_at.is_some() || before.list_trashed_at.is_some();
+    if in_trash && !matches!(change, Change::Trash(_)) {
+        return Err("restore the task from Trash first".into());
+    }
     match change {
         Change::Edit {
             title,
@@ -394,6 +450,7 @@ pub fn change_task(db: &mut Connection, id: &str, change: Change<'_>) -> Result<
         }
         Change::Move(dest) => {
             let dest = resolve_id(&tx, "lists", dest)?;
+            ensure_active_list(&tx, dest)?;
             tx.execute("UPDATE todos SET list_id = ? WHERE id = ?", [dest, id])?;
         }
         Change::Complete(note) => {
@@ -445,8 +502,22 @@ pub fn change_task(db: &mut Connection, id: &str, change: Change<'_>) -> Result<
                 params![id, agent],
             )?;
         }
-        Change::Delete => {
-            let before = task_by_row(&tx, id)?;
+        Change::Trash(TrashAction::Delete) => {
+            tx.execute(
+                "UPDATE todos SET trashed_at = COALESCE(trashed_at, ?) WHERE id = ?",
+                params![chrono::Utc::now().to_rfc3339(), id],
+            )?;
+        }
+        Change::Trash(TrashAction::Restore) => {
+            if before.list_trashed_at.is_some() {
+                return Err("restore the parent list from Trash first".into());
+            }
+            tx.execute("UPDATE todos SET trashed_at = NULL WHERE id = ?", [id])?;
+        }
+        Change::Trash(TrashAction::Purge) => {
+            if !in_trash {
+                return Err("only tasks in Trash can be purged".into());
+            }
             tx.execute("DELETE FROM todos WHERE id = ?", [id])?;
             tx.commit()?;
             return Ok(before);

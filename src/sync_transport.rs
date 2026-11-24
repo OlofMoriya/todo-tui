@@ -14,7 +14,8 @@ use crate::{
 };
 
 const MAX: u64 = 32 * 1024 * 1024;
-const PROTOCOL: u32 = 1;
+// Older peers do not preserve Trash metadata. Refuse to sync with them.
+const PROTOCOL: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Target {

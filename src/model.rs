@@ -18,6 +18,8 @@ pub struct Todo {
     pub next: bool,
     pub completion_note: Option<String>,
     pub pins: Vec<Pin>,
+    pub trashed_at: Option<String>,
+    pub list_trashed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -33,4 +35,5 @@ pub struct TodoList {
     #[serde(rename = "id")]
     pub uid: String,
     pub title: String,
+    pub trashed_at: Option<String>,
 }
