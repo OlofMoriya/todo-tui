@@ -57,7 +57,7 @@ Trash is hidden from regular lists, Today, and Pinned. `show` still works for a 
 ## Optional SSH sync
 
 1. Install the same `todo-tui` version on the Mac mini and MacBook. Upgrade both to 0.3.0 or newer before syncing Trash; older peers are rejected. Enable macOS Remote Login on the mini. As the MacBook user, verify the mini's host key and set up key-based SSH so `ssh -o BatchMode=yes mini true` succeeds. Use your SSH config for an alias, custom port, or IPv6 address.
-2. On the MacBook, configure the mini. This starts the first sync immediately and installs a macOS login agent that checks every 60 seconds while you are logged in, even with the TUI closed. Run the same command again to install the agent for an existing configuration.
+2. On the MacBook, configure the mini. This starts the first sync immediately and installs a macOS login agent that checks every 60 seconds while you are logged in, even with the TUI closed. Change the interval with `todo-tui sync interval 120` (seconds); applying it reloads the login agent for an existing configuration.
 
    ```sh
    todo-tui sync configure mini --remote-bin /opt/homebrew/bin/todo-tui

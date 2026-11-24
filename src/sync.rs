@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     database::{self as db, Result},
     snapshot::{self, Delta, Record, Snapshot},
+    sync_background::DEFAULT_INTERVAL_SECS,
     sync_log::{self, Entry, Kind},
     sync_transport::{self as ssh, Attempt, Target},
 };
@@ -27,6 +28,11 @@ pub enum SyncAction {
     Off,
     /// Show the stored status without connecting
     Status,
+    /// Set how often automatic SSH sync runs (in seconds)
+    Interval {
+        #[arg(value_parser = clap::value_parser!(u64).range(1..=86_400))]
+        seconds: u64,
+    },
     /// Review recent transfers and sync issues
     Log,
     /// Show exactly what the first import would push and pull
@@ -70,6 +76,8 @@ struct State {
     target: Option<Target>,
     #[serde(default)]
     automatic_import: bool,
+    #[serde(default)]
+    interval_secs: Option<u64>,
     master: Option<String>,
     base: Option<Snapshot>,
     preview: Option<Preview>,
@@ -78,6 +86,12 @@ struct State {
     last_success: Option<String>,
     reachable: Option<bool>,
     last_error: Option<String>,
+}
+
+impl State {
+    fn interval(&self) -> u64 {
+        self.interval_secs.unwrap_or(DEFAULT_INTERVAL_SECS)
+    }
 }
 
 pub fn init(conn: &Connection) -> Result<()> {
@@ -504,6 +518,7 @@ pub fn run(mode: Mode) -> Result<Outcome> {
 struct Status {
     target: Option<Target>,
     background_active: bool,
+    interval_secs: u64,
     first_import_pending: bool,
     pending_changes: Option<usize>,
     pending_attempt: bool,
@@ -531,6 +546,7 @@ fn status(conn: &mut Connection) -> Result<Status> {
     Ok(Status {
         first_import_pending: s.target.is_some() && s.base.is_none(),
         background_active: s.target.is_some() && crate::sync_background::active(),
+        interval_secs: s.interval(),
         target: s.target,
         pending_changes,
         pending_attempt: s.pending.is_some(),
@@ -541,10 +557,13 @@ fn status(conn: &mut Connection) -> Result<Status> {
     })
 }
 
-pub fn automatic_ready() -> Result<bool> {
+pub fn automatic_settings() -> Result<(bool, u64)> {
     let conn = open_state()?;
     let s = load(&conn)?;
-    Ok(s.target.is_some() && (s.automatic_import || s.base.is_some() || s.pending.is_some()))
+    Ok((
+        s.target.is_some() && (s.automatic_import || s.base.is_some() || s.pending.is_some()),
+        s.interval(),
+    ))
 }
 
 pub fn cli(
@@ -642,7 +661,8 @@ pub fn cli(
             } else {
                 run(Mode::Automatic).map(Some)
             };
-            let background_active = crate::sync_background::enable()?;
+            let interval_secs = load(&conn)?.interval();
+            let background_active = crate::sync_background::enable(interval_secs)?;
             let first = first?;
             #[derive(Serialize)]
             struct Configured<'a> {
@@ -669,6 +689,23 @@ pub fn cli(
                     println!("No login agent is running right now. The open TUI can sync in the background.");
                 }
             })
+        }
+        Some(SyncAction::Interval { seconds }) => {
+            let mut conn = open_state()?;
+            let mut configured = false;
+            update(&mut conn, |_, s| {
+                s.interval_secs = Some(seconds);
+                configured = s.target.is_some();
+                Ok(())
+            })?;
+            let background_active = configured && crate::sync_background::enable(seconds)?;
+            out(
+                &serde_json::json!({ "interval_secs": seconds, "background_active": background_active }),
+                json,
+                || {
+                    println!("Automatic SSH sync interval: {seconds} seconds");
+                },
+            )
         }
         Some(SyncAction::Off) => {
             let mut conn = open_state()?;
@@ -711,6 +748,7 @@ pub fn cli(
                 if let Some(n) = s.pending_changes {
                     println!("Pending local changes: {n}");
                 }
+                println!("Automatic sync interval: {} seconds", s.interval_secs);
                 println!("Unresolved conflicts: {}", s.conflicts);
                 if s.first_import_pending {
                     println!("First import pending");

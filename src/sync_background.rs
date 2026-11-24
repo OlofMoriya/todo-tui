@@ -1,6 +1,6 @@
 use crate::database::Result;
 
-pub const INTERVAL_SECS: u64 = 60;
+pub const DEFAULT_INTERVAL_SECS: u64 = 60;
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -10,7 +10,7 @@ mod macos {
         process::{Command, Stdio},
     };
 
-    use super::{Result, INTERVAL_SECS};
+    use super::Result;
 
     const LABEL: &str = "com.olofmoriya.todo-tui.sync";
 
@@ -74,7 +74,7 @@ mod macos {
             .replace('>', "&gt;")
     }
 
-    pub fn enable() -> Result<bool> {
+    pub fn enable(interval_secs: u64) -> Result<bool> {
         let Some((domain, path)) = location()? else {
             return Ok(false);
         };
@@ -90,7 +90,7 @@ mod macos {
 <key>Label</key><string>{LABEL}</string>
 <key>ProgramArguments</key><array><string>{binary}</string><string>sync</string><string>--automatic</string></array>
 <key>RunAtLoad</key><true/>
-<key>StartInterval</key><integer>{INTERVAL_SECS}</integer>
+<key>StartInterval</key><integer>{interval_secs}</integer>
 </dict></plist>
 "#
         );
@@ -143,7 +143,7 @@ mod macos {
 pub use macos::{active, disable, enable};
 
 #[cfg(not(target_os = "macos"))]
-pub fn enable() -> Result<bool> {
+pub fn enable(_interval_secs: u64) -> Result<bool> {
     Ok(false)
 }
 #[cfg(not(target_os = "macos"))]

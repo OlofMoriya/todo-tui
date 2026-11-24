@@ -135,9 +135,19 @@ fn key(prefix: &str, id: &str) -> String {
 #[test]
 fn configure_imports_and_logs_changes_and_issues() {
     let p = Pair::new();
+    assert_eq!(p.local(&["sync", "status"])["interval_secs"], 60);
+    assert_eq!(p.local(&["sync", "interval", "120"])["interval_secs"], 120);
+    assert_eq!(p.count_ssh(), 0);
+    assert_eq!(
+        p.command(false, &["sync", "interval", "0"], "")
+            .status
+            .code(),
+        Some(2)
+    );
     p.master(&["add", "On master"]);
     let configured = p.local(&["sync", "configure", "mini"]);
     assert_eq!(configured["sync"]["outcome"], "synced");
+    assert_eq!(p.local(&["sync", "status"])["interval_secs"], 120);
     assert_eq!(p.local(&["list"])[0]["title"], "On master");
     let log = p.local(&["sync", "log"]);
     assert_eq!(log[0]["downloaded"][0]["after"]["title"], "On master");

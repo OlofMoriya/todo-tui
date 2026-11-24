@@ -987,7 +987,7 @@ impl Drop for Tty {
 
 struct SyncWorker {
     request: mpsc::Sender<crate::sync::Mode>,
-    responses: mpsc::Receiver<Option<String>>,
+    responses: mpsc::Receiver<(Option<String>, u64)>,
     busy: bool,
     next: Instant,
 }
@@ -999,16 +999,17 @@ impl SyncWorker {
         let (results, responses) = mpsc::channel();
         thread::spawn(move || {
             while let Ok(mode) = jobs.recv() {
+                let mut interval = crate::sync_background::DEFAULT_INTERVAL_SECS;
                 let outcome = (|| -> Result<Option<String>> {
-                    if mode == Mode::Automatic
-                        && (!sync::automatic_ready()? || crate::sync_background::active())
-                    {
+                    let (ready, configured_interval) = sync::automatic_settings()?;
+                    interval = configured_interval;
+                    if mode == Mode::Automatic && (!ready || crate::sync_background::active()) {
                         return Ok(None);
                     }
                     Ok(Some(sync::run(mode)?.message()))
                 })()
                 .unwrap_or_else(|e| Some(format!("SSH sync: {e}")));
-                if results.send(outcome).is_err() {
+                if results.send((outcome, interval)).is_err() {
                     break;
                 }
             }
@@ -1022,14 +1023,14 @@ impl SyncWorker {
     }
 
     fn tick(&mut self, status: &mut String, manual: bool) {
-        if let Ok(message) = self.responses.try_recv() {
+        if let Ok((message, interval)) = self.responses.try_recv() {
             self.busy = false;
+            self.next = Instant::now() + Duration::from_secs(interval);
             if let Some(message) = message {
                 *status = message;
             }
         }
         if !self.busy && (manual || Instant::now() >= self.next) {
-            self.next = Instant::now() + Duration::from_secs(crate::sync_background::INTERVAL_SECS);
             let mode = if manual {
                 crate::sync::Mode::Normal
             } else {
