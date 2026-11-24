@@ -1,5 +1,11 @@
 # todo-tui rebuild
 
+## Rebuild status
+
+- **Rebuilt:** local task/list workflows, the JSON CLI, and the Pinned, Lists, and Today tabs. The CLI and TUI use the same SQLite queries and mutations. The migration is covered by tests against disposable copies of the legacy schema.
+- **Still open:** optional SSH sync (including first-import preview, backups, conflict handling, and two-database acceptance tests) and Owl actions. No normal query makes a network call.
+- **Owl prerequisite:** verify a tool-disabled request path before sending task text. The installed Owl CLI exposes agent roles, but selecting a role is not the same as disabling tools.
+
 ## Keep working
 
 - Local SQLite remains the default. The TUI and existing `list` and `add` commands keep working without SSH or an agent.
