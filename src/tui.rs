@@ -1029,7 +1029,7 @@ impl SyncWorker {
             }
         }
         if !self.busy && (manual || Instant::now() >= self.next) {
-            self.next = Instant::now() + Duration::from_secs(5);
+            self.next = Instant::now() + Duration::from_secs(crate::sync_background::INTERVAL_SECS);
             let mode = if manual {
                 crate::sync::Mode::Normal
             } else {

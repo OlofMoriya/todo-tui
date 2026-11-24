@@ -1,5 +1,7 @@
 use crate::database::Result;
 
+pub const INTERVAL_SECS: u64 = 60;
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::{
@@ -8,10 +10,9 @@ mod macos {
         process::{Command, Stdio},
     };
 
-    use super::Result;
+    use super::{Result, INTERVAL_SECS};
 
     const LABEL: &str = "com.olofmoriya.todo-tui.sync";
-    const INTERVAL: u32 = 10;
 
     fn location() -> Result<Option<(String, PathBuf)>> {
         // Isolated/test databases must never install or control the login agent.
@@ -89,7 +90,7 @@ mod macos {
 <key>Label</key><string>{LABEL}</string>
 <key>ProgramArguments</key><array><string>{binary}</string><string>sync</string><string>--automatic</string></array>
 <key>RunAtLoad</key><true/>
-<key>StartInterval</key><integer>{INTERVAL}</integer>
+<key>StartInterval</key><integer>{INTERVAL_SECS}</integer>
 </dict></plist>
 "#
         );
