@@ -16,10 +16,10 @@ use crossterm::{
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    text::{Line, Span},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame, Terminal,
 };
 use rusqlite::Connection;
@@ -821,6 +821,127 @@ fn draw_activity<B: Backend>(
     );
 }
 
+fn agent_color(agent: &str) -> Color {
+    let palette = [
+        Color::LightCyan,
+        Color::LightMagenta,
+        Color::LightGreen,
+        Color::LightBlue,
+        Color::LightYellow,
+    ];
+    let hash = agent.bytes().fold(0usize, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(byte.into())
+    });
+    palette[hash % palette.len()]
+}
+
+fn draw_focus_board<B: Backend>(frame: &mut Frame<B>, area: Rect, ui: &mut Ui) {
+    let cyan = Style::default()
+        .fg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(Color::Gray);
+    let board = Block::default()
+        .title(Span::styled(" ✦ FOCUS BOARD ", cyan))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan));
+    let area = {
+        let inside = board.inner(area);
+        frame.render_widget(board, area);
+        inside
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    if ui.rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled("  ◇  Nothing pinned yet", cyan),
+                Line::styled(
+                    "     Press p on a task to claim it, or have Pi pin its next work item.",
+                    muted,
+                ),
+            ])
+            .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let mut groups = std::collections::BTreeMap::new();
+    for pin in ui.rows.iter().filter_map(|row| row.pin.as_ref()) {
+        *groups.entry(pin.agent.as_str()).or_insert(0usize) += 1;
+    }
+    let mut list_area = area;
+    if area.height >= 6 {
+        let summary = Line::from(vec![
+            Span::styled(format!("  {} pinned", ui.rows.len()), cyan),
+            Span::styled(
+                format!("  ·  {} people & agents  ·  v details", groups.len()),
+                muted,
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(summary), Rect { height: 1, ..area });
+        list_area.y += 2;
+        list_area.height -= 2;
+    }
+    let compact = list_area.height < 4;
+    let mut previous = None;
+    let items = ui
+        .rows
+        .iter()
+        .map(|row| {
+            let mut lines = Vec::new();
+            let Some(pin) = &row.pin else {
+                return ListItem::new(task_label(&row.task));
+            };
+            let color = agent_color(&pin.agent);
+            let badge = Style::default().fg(color).add_modifier(Modifier::BOLD);
+            let avatar = safe(&pin.avatar);
+            let mut title = vec![
+                Span::styled(format!(" {avatar}  "), badge),
+                Span::styled(
+                    safe(&row.task.title),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if compact {
+                title.push(Span::styled(format!("  ·  {}", safe(&pin.agent)), muted));
+            } else if previous != Some(pin.agent.as_str()) {
+                if previous.is_some() && list_area.height >= 8 {
+                    lines.push(Line::default());
+                }
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" ━  {} ", safe(&pin.agent)), badge),
+                    Span::styled(format!("· {} pinned", groups[pin.agent.as_str()]), muted),
+                ]));
+            }
+            previous = Some(pin.agent.as_str());
+            lines.push(Line::from(title));
+            if !compact {
+                let mut meta = vec![Span::styled(
+                    format!("     ▸ {}", safe(&row.task.list_title)),
+                    muted,
+                )];
+                if let Some(due) = row.task.due_date {
+                    meta.push(Span::styled(format!("  ·  Due {due}"), muted));
+                }
+                if row.task.next {
+                    meta.push(Span::styled("  ·  NEXT", badge));
+                }
+                lines.push(Line::from(meta));
+            }
+            ListItem::new(lines)
+        })
+        .collect::<Vec<_>>();
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("▌ ")
+            .highlight_style(Style::default().fg(Color::White).bg(Color::Indexed(236))),
+        list_area,
+        &mut ui.tasks_state,
+    );
+}
+
 fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
     let accent = Style::default()
         .fg(Color::Cyan)
@@ -935,52 +1056,36 @@ fn draw<B: Backend>(frame: &mut Frame<B>, ui: &mut Ui) {
     } else {
         browser
     };
-    let mut group = None;
-    let items = ui
-        .rows
-        .iter()
-        .map(|row| {
-            let mut lines = vec![];
-            if let Some(pin) = &row.pin {
-                if group != Some(pin.agent.as_str()) {
-                    lines.push(Line::styled(safe(&pin.agent), accent));
-                    group = Some(&pin.agent);
-                }
-                lines.push(Line::from(format!(
-                    "{} {} · {}",
-                    safe(&pin.avatar),
-                    task_label(&row.task),
-                    safe(&row.task.list_title)
-                )));
-            } else if ui.view == View::Trash {
-                lines.push(Line::from(format!(
-                    "{} · {}",
-                    task_label(&row.task),
-                    safe(&row.task.list_title)
-                )));
-            } else {
-                lines.push(Line::from(task_label(&row.task)));
-            }
-            ListItem::new(lines)
-        })
-        .collect::<Vec<_>>();
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_symbol("› ")
-            .highlight_style(if on_lists { Style::default() } else { accent })
-            .block(
-                Block::default()
-                    .title(match ui.view {
-                        View::Lists => "Tasks",
-                        View::Pinned => "By human or agent",
-                        View::Today => "Priorities",
-                        View::Trash => "Trashed tasks",
-                    })
-                    .borders(Borders::ALL),
-            ),
-        task_area,
-        &mut ui.tasks_state,
-    );
+    if ui.view == View::Pinned {
+        draw_focus_board(frame, task_area, ui);
+    } else {
+        let items = ui
+            .rows
+            .iter()
+            .map(|row| {
+                let label = task_label(&row.task);
+                ListItem::new(if ui.view == View::Trash {
+                    format!("{label} · {}", safe(&row.task.list_title))
+                } else {
+                    label
+                })
+            })
+            .collect::<Vec<_>>();
+        let title = match ui.view {
+            View::Lists => "Tasks",
+            View::Today => "Priorities",
+            View::Trash => "Trashed tasks",
+            View::Pinned => unreachable!(),
+        };
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_symbol("› ")
+                .highlight_style(if on_lists { Style::default() } else { accent })
+                .block(Block::default().title(title).borders(Borders::ALL)),
+            task_area,
+            &mut ui.tasks_state,
+        );
+    }
     if let Some(area) = details {
         frame.render_widget(
             Paragraph::new(
@@ -1451,7 +1556,14 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol.as_str())
             .collect::<String>();
-        for text in ["By human or agent", "Pikachu", "Robot"] {
+        for text in [
+            "FOCUS BOARD",
+            "2 pinned",
+            "2 people & agents",
+            "Pikachu",
+            "Robot",
+            "▸ Inbox",
+        ] {
             assert!(rendered.contains(text), "missing {text}");
         }
         press(&mut ui, &mut conn, KeyCode::Char('m'));
