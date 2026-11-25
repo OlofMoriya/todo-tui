@@ -823,10 +823,9 @@ fn draw_activity<B: Backend>(
 
 fn agent_color(agent: &str) -> Color {
     let palette = [
+        Color::LightGreen,
         Color::LightCyan,
         Color::LightMagenta,
-        Color::LightGreen,
-        Color::LightBlue,
         Color::LightYellow,
     ];
     let hash = agent.bytes().fold(0usize, |acc, byte| {
@@ -835,16 +834,25 @@ fn agent_color(agent: &str) -> Color {
     palette[hash % palette.len()]
 }
 
+fn agent_display(agent: &str) -> String {
+    if let Some((project, session)) = agent.strip_prefix("Pi/").and_then(|s| s.rsplit_once('/')) {
+        return format!("Pi / {}  #{}", safe(project), safe(session));
+    }
+    safe(agent)
+}
+
 fn draw_focus_board<B: Backend>(frame: &mut Frame<B>, area: Rect, ui: &mut Ui) {
-    let cyan = Style::default()
-        .fg(Color::LightCyan)
+    let neon = Style::default()
+        .fg(Color::LightGreen)
         .add_modifier(Modifier::BOLD);
-    let muted = Style::default().fg(Color::Gray);
+    let muted = Style::default().fg(Color::Rgb(137, 186, 177));
+    let panel = Color::Rgb(8, 25, 26);
     let board = Block::default()
-        .title(Span::styled(" ✦ FOCUS BOARD ", cyan))
+        .title(Span::styled(" ◈ FOCUS BOARD // AGENT CONSOLE ", neon))
+        .style(Style::default().bg(panel))
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Rgb(40, 123, 101)));
     let area = {
         let inside = board.inner(area);
         frame.render_widget(board, area);
@@ -856,7 +864,7 @@ fn draw_focus_board<B: Backend>(frame: &mut Frame<B>, area: Rect, ui: &mut Ui) {
     if ui.rows.is_empty() {
         frame.render_widget(
             Paragraph::new(vec![
-                Line::styled("  ◇  Nothing pinned yet", cyan),
+                Line::styled("  ◇  STANDBY // No pinned work", neon),
                 Line::styled(
                     "     Press p on a task to claim it, or have Pi pin its next work item.",
                     muted,
@@ -874,22 +882,22 @@ fn draw_focus_board<B: Backend>(frame: &mut Frame<B>, area: Rect, ui: &mut Ui) {
     let mut list_area = area;
     if area.height >= 6 {
         let summary = Line::from(vec![
-            Span::styled(format!("  {} pinned", ui.rows.len()), cyan),
-            Span::styled(
-                format!("  ·  {} people & agents  ·  v details", groups.len()),
-                muted,
-            ),
+            Span::styled("  ▰▰▱  ", neon),
+            Span::styled(format!("{:02} PINS", ui.rows.len()), neon),
+            Span::styled(format!("   //   {:02} IDENTITIES", groups.len()), muted),
         ]);
         frame.render_widget(Paragraph::new(summary), Rect { height: 1, ..area });
         list_area.y += 2;
         list_area.height -= 2;
     }
-    let compact = list_area.height < 4;
+    let compact = list_area.height < 5;
+    let selected = ui.tasks_state.selected();
     let mut previous = None;
     let items = ui
         .rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, row)| {
             let mut lines = Vec::new();
             let Some(pin) = &row.pin else {
                 return ListItem::new(task_label(&row.task));
@@ -897,46 +905,66 @@ fn draw_focus_board<B: Backend>(frame: &mut Frame<B>, area: Rect, ui: &mut Ui) {
             let color = agent_color(&pin.agent);
             let badge = Style::default().fg(color).add_modifier(Modifier::BOLD);
             let avatar = safe(&pin.avatar);
+            let avatar = if avatar.trim().is_empty() {
+                "◇"
+            } else {
+                &avatar
+            };
+            let identity = agent_display(&pin.agent);
             let mut title = vec![
-                Span::styled(format!(" {avatar}  "), badge),
+                Span::styled(
+                    format!(" ⟦ {avatar} ⟧  "),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
                 Span::styled(
                     safe(&row.task.title),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
             ];
             if compact {
-                title.push(Span::styled(format!("  ·  {}", safe(&pin.agent)), muted));
+                title.push(Span::styled(format!("  //  {identity}"), muted));
             } else if previous != Some(pin.agent.as_str()) {
                 if previous.is_some() && list_area.height >= 8 {
                     lines.push(Line::default());
                 }
                 lines.push(Line::from(vec![
-                    Span::styled(format!(" ━  {} ", safe(&pin.agent)), badge),
-                    Span::styled(format!("· {} pinned", groups[pin.agent.as_str()]), muted),
+                    Span::styled(" ╭─◈  ", badge),
+                    Span::styled(identity, badge),
+                    Span::styled(
+                        format!("  //  {:02} PINS", groups[pin.agent.as_str()]),
+                        muted,
+                    ),
                 ]));
             }
             previous = Some(pin.agent.as_str());
             lines.push(Line::from(title));
             if !compact {
                 let mut meta = vec![Span::styled(
-                    format!("     ▸ {}", safe(&row.task.list_title)),
+                    format!(" ╰─▸  PINNED  /  {}", safe(&row.task.list_title)),
                     muted,
                 )];
                 if let Some(due) = row.task.due_date {
-                    meta.push(Span::styled(format!("  ·  Due {due}"), muted));
+                    meta.push(Span::styled(format!("  /  DUE {due}"), muted));
                 }
                 if row.task.next {
                     meta.push(Span::styled("  ·  NEXT", badge));
                 }
                 lines.push(Line::from(meta));
             }
-            ListItem::new(lines)
+            let surface = if selected == Some(index) {
+                Color::Rgb(20, 60, 53)
+            } else {
+                panel
+            };
+            ListItem::new(lines).style(Style::default().fg(Color::White).bg(surface))
         })
         .collect::<Vec<_>>();
     frame.render_stateful_widget(
-        List::new(items)
-            .highlight_symbol("▌ ")
-            .highlight_style(Style::default().fg(Color::White).bg(Color::Indexed(236))),
+        List::new(items).style(neon).highlight_symbol("▌ "),
         list_area,
         &mut ui.tasks_state,
     );
@@ -1558,11 +1586,12 @@ mod tests {
             .collect::<String>();
         for text in [
             "FOCUS BOARD",
-            "2 pinned",
-            "2 people & agents",
-            "Pikachu",
-            "Robot",
-            "▸ Inbox",
+            "AGENT CONSOLE",
+            "02 PINS",
+            "02 IDENTITIES",
+            "⟦ Pikachu ⟧",
+            "⟦ Robot ⟧",
+            "PINNED  /  Inbox",
         ] {
             assert!(rendered.contains(text), "missing {text}");
         }
